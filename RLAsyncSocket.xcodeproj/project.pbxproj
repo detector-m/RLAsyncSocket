@@ -10,6 +10,15 @@
 		96BEE2551C0F1BE5007F22F5 /* RLAsyncSocket.h in Headers */ = {isa = PBXBuildFile; fileRef = 96BEE2541C0F1BE5007F22F5 /* RLAsyncSocket.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		96BEE25B1C0F1BE5007F22F5 /* RLAsyncSocket.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 96BEE24F1C0F1BE5007F22F5 /* RLAsyncSocket.framework */; };
 		96BEE2621C0F1BE5007F22F5 /* RLAsyncSocketTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 96BEE2611C0F1BE5007F22F5 /* RLAsyncSocketTests.m */; };
+		96BEE27C1C0F2D35007F22F5 /* AsyncSocket.h in Headers */ = {isa = PBXBuildFile; fileRef = 96BEE2791C0F2D35007F22F5 /* AsyncSocket.h */; };
+		96BEE27D1C0F2D35007F22F5 /* AsyncSocket.m in Sources */ = {isa = PBXBuildFile; fileRef = 96BEE27A1C0F2D35007F22F5 /* AsyncSocket.m */; };
+		96BEE27E1C0F2D35007F22F5 /* AsyncSocketDelegate.h in Headers */ = {isa = PBXBuildFile; fileRef = 96BEE27B1C0F2D35007F22F5 /* AsyncSocketDelegate.h */; };
+		96BEE2811C0F2D62007F22F5 /* AsyncReadPacket.h in Headers */ = {isa = PBXBuildFile; fileRef = 96BEE27F1C0F2D62007F22F5 /* AsyncReadPacket.h */; };
+		96BEE2821C0F2D62007F22F5 /* AsyncReadPacket.m in Sources */ = {isa = PBXBuildFile; fileRef = 96BEE2801C0F2D62007F22F5 /* AsyncReadPacket.m */; };
+		96BEE2851C0F2D9F007F22F5 /* AsyncWritePacket.h in Headers */ = {isa = PBXBuildFile; fileRef = 96BEE2831C0F2D9F007F22F5 /* AsyncWritePacket.h */; };
+		96BEE2861C0F2D9F007F22F5 /* AsyncWritePacket.m in Sources */ = {isa = PBXBuildFile; fileRef = 96BEE2841C0F2D9F007F22F5 /* AsyncWritePacket.m */; };
+		96BEE2891C0F2DD0007F22F5 /* AsyncSpecialPacket.h in Headers */ = {isa = PBXBuildFile; fileRef = 96BEE2871C0F2DD0007F22F5 /* AsyncSpecialPacket.h */; };
+		96BEE28A1C0F2DD0007F22F5 /* AsyncSpecialPacket.m in Sources */ = {isa = PBXBuildFile; fileRef = 96BEE2881C0F2DD0007F22F5 /* AsyncSpecialPacket.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -29,6 +38,15 @@
 		96BEE25A1C0F1BE5007F22F5 /* RLAsyncSocketTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RLAsyncSocketTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		96BEE2601C0F1BE5007F22F5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		96BEE2611C0F1BE5007F22F5 /* RLAsyncSocketTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RLAsyncSocketTests.m; sourceTree = "<group>"; };
+		96BEE2791C0F2D35007F22F5 /* AsyncSocket.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AsyncSocket.h; sourceTree = "<group>"; };
+		96BEE27A1C0F2D35007F22F5 /* AsyncSocket.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = AsyncSocket.m; sourceTree = "<group>"; };
+		96BEE27B1C0F2D35007F22F5 /* AsyncSocketDelegate.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AsyncSocketDelegate.h; sourceTree = "<group>"; };
+		96BEE27F1C0F2D62007F22F5 /* AsyncReadPacket.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AsyncReadPacket.h; sourceTree = "<group>"; };
+		96BEE2801C0F2D62007F22F5 /* AsyncReadPacket.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = AsyncReadPacket.m; sourceTree = "<group>"; };
+		96BEE2831C0F2D9F007F22F5 /* AsyncWritePacket.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AsyncWritePacket.h; sourceTree = "<group>"; };
+		96BEE2841C0F2D9F007F22F5 /* AsyncWritePacket.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = AsyncWritePacket.m; sourceTree = "<group>"; };
+		96BEE2871C0F2DD0007F22F5 /* AsyncSpecialPacket.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AsyncSpecialPacket.h; sourceTree = "<group>"; };
+		96BEE2881C0F2DD0007F22F5 /* AsyncSpecialPacket.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = AsyncSpecialPacket.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -71,7 +89,8 @@
 		96BEE2511C0F1BE5007F22F5 /* RLAsyncSocket */ = {
 			isa = PBXGroup;
 			children = (
-				96BEE26C1C0F216D007F22F5 /* RunLoop */,
+				96BEE2771C0F2D35007F22F5 /* Packet */,
+				96BEE2781C0F2D35007F22F5 /* RunLoop */,
 				96BEE2541C0F1BE5007F22F5 /* RLAsyncSocket.h */,
 				96BEE2521C0F1BE5007F22F5 /* Supporting Files */,
 			);
@@ -103,13 +122,30 @@
 			name = "Supporting Files";
 			sourceTree = "<group>";
 		};
-		96BEE26C1C0F216D007F22F5 /* RunLoop */ = {
+		96BEE2771C0F2D35007F22F5 /* Packet */ = {
 			isa = PBXGroup;
 			children = (
+				96BEE27F1C0F2D62007F22F5 /* AsyncReadPacket.h */,
+				96BEE2801C0F2D62007F22F5 /* AsyncReadPacket.m */,
+				96BEE2831C0F2D9F007F22F5 /* AsyncWritePacket.h */,
+				96BEE2841C0F2D9F007F22F5 /* AsyncWritePacket.m */,
+				96BEE2871C0F2DD0007F22F5 /* AsyncSpecialPacket.h */,
+				96BEE2881C0F2DD0007F22F5 /* AsyncSpecialPacket.m */,
+			);
+			name = Packet;
+			path = src/Packet;
+			sourceTree = SOURCE_ROOT;
+		};
+		96BEE2781C0F2D35007F22F5 /* RunLoop */ = {
+			isa = PBXGroup;
+			children = (
+				96BEE2791C0F2D35007F22F5 /* AsyncSocket.h */,
+				96BEE27A1C0F2D35007F22F5 /* AsyncSocket.m */,
+				96BEE27B1C0F2D35007F22F5 /* AsyncSocketDelegate.h */,
 			);
 			name = RunLoop;
-			path = SRC/RunLoop;
-			sourceTree = "<group>";
+			path = src/RunLoop;
+			sourceTree = SOURCE_ROOT;
 		};
 /* End PBXGroup section */
 
@@ -118,6 +154,11 @@
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				96BEE2851C0F2D9F007F22F5 /* AsyncWritePacket.h in Headers */,
+				96BEE27E1C0F2D35007F22F5 /* AsyncSocketDelegate.h in Headers */,
+				96BEE2811C0F2D62007F22F5 /* AsyncReadPacket.h in Headers */,
+				96BEE2891C0F2DD0007F22F5 /* AsyncSpecialPacket.h in Headers */,
+				96BEE27C1C0F2D35007F22F5 /* AsyncSocket.h in Headers */,
 				96BEE2551C0F1BE5007F22F5 /* RLAsyncSocket.h in Headers */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -218,6 +259,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				96BEE2821C0F2D62007F22F5 /* AsyncReadPacket.m in Sources */,
+				96BEE2861C0F2D9F007F22F5 /* AsyncWritePacket.m in Sources */,
+				96BEE28A1C0F2DD0007F22F5 /* AsyncSpecialPacket.m in Sources */,
+				96BEE27D1C0F2D35007F22F5 /* AsyncSocket.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
