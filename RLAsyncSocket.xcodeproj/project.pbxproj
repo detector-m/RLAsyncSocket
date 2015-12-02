@@ -71,7 +71,7 @@
 		96BEE2511C0F1BE5007F22F5 /* RLAsyncSocket */ = {
 			isa = PBXGroup;
 			children = (
-				96BEE26B1C0F1C2B007F22F5 /* RunLoop */,
+				96BEE26C1C0F216D007F22F5 /* RunLoop */,
 				96BEE2541C0F1BE5007F22F5 /* RLAsyncSocket.h */,
 				96BEE2521C0F1BE5007F22F5 /* Supporting Files */,
 			);
@@ -103,13 +103,13 @@
 			name = "Supporting Files";
 			sourceTree = "<group>";
 		};
-		96BEE26B1C0F1C2B007F22F5 /* RunLoop */ = {
+		96BEE26C1C0F216D007F22F5 /* RunLoop */ = {
 			isa = PBXGroup;
 			children = (
 			);
 			name = RunLoop;
 			path = SRC/RunLoop;
-			sourceTree = SOURCE_ROOT;
+			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
 
