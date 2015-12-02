@@ -10,8 +10,6 @@
 		96BEE2551C0F1BE5007F22F5 /* RLAsyncSocket.h in Headers */ = {isa = PBXBuildFile; fileRef = 96BEE2541C0F1BE5007F22F5 /* RLAsyncSocket.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		96BEE25B1C0F1BE5007F22F5 /* RLAsyncSocket.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 96BEE24F1C0F1BE5007F22F5 /* RLAsyncSocket.framework */; };
 		96BEE2621C0F1BE5007F22F5 /* RLAsyncSocketTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 96BEE2611C0F1BE5007F22F5 /* RLAsyncSocketTests.m */; };
-		96BEE26F1C0F21C5007F22F5 /* teee.h in Headers */ = {isa = PBXBuildFile; fileRef = 96BEE26D1C0F21C5007F22F5 /* teee.h */; };
-		96BEE2701C0F21C5007F22F5 /* teee.m in Sources */ = {isa = PBXBuildFile; fileRef = 96BEE26E1C0F21C5007F22F5 /* teee.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -31,8 +29,6 @@
 		96BEE25A1C0F1BE5007F22F5 /* RLAsyncSocketTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RLAsyncSocketTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		96BEE2601C0F1BE5007F22F5 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		96BEE2611C0F1BE5007F22F5 /* RLAsyncSocketTests.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = RLAsyncSocketTests.m; sourceTree = "<group>"; };
-		96BEE26D1C0F21C5007F22F5 /* teee.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = teee.h; sourceTree = "<group>"; };
-		96BEE26E1C0F21C5007F22F5 /* teee.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = teee.m; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -110,8 +106,6 @@
 		96BEE26C1C0F216D007F22F5 /* RunLoop */ = {
 			isa = PBXGroup;
 			children = (
-				96BEE26D1C0F21C5007F22F5 /* teee.h */,
-				96BEE26E1C0F21C5007F22F5 /* teee.m */,
 			);
 			name = RunLoop;
 			path = SRC/RunLoop;
@@ -125,7 +119,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				96BEE2551C0F1BE5007F22F5 /* RLAsyncSocket.h in Headers */,
-				96BEE26F1C0F21C5007F22F5 /* teee.h in Headers */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -225,7 +218,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				96BEE2701C0F21C5007F22F5 /* teee.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
