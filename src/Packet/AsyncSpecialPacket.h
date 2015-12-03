@@ -16,6 +16,7 @@
 @interface AsyncSpecialPacket : NSObject {
 @public
     NSDictionary *tlsSettings;
+    NSString *test;
 }
 
 @end
