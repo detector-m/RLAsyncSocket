@@ -426,6 +426,176 @@ static void MyCFWriteStreamCallback(CFWriteStreamRef stream, CFStreamEventType t
 }
 
 #pragma mark Accepting
+- (BOOL)acceptOnPort:(UInt16)port error:(NSError **)errPtr {
+    return [self acceptOnInterface:nil port:port error:errPtr];
+}
+
+/**
+ * To accept on a certain interface, pass the address to accept on.
+ * To accept on any interface, pass nil or an empty string.
+ * To accept only connections from localhost pass "localhost" or "loopback".
+ **/
+- (BOOL)acceptOnInterface:(NSString *)interface port:(UInt16)port error:(NSError **)errPtr {
+    if(_theDelegate == NULL) {
+        [NSException raise:AsyncSocketException format:@"Attempting to accept without a delegate. Set a delegate first."];
+    }
+    
+    if(![self isDisconnected]) {
+        [NSException raise:AsyncSocketException
+                    format:@"Attempting to accept while connected or accepting connections. Disconnect first."];
+    }
+    
+    // clear queues (spurious read/write requests post disconnect)
+    [self emptyQueues];
+    
+    // set up the listen sockaddr structs if needed.
+    NSData *address4 = nil, *address6 = nil;
+    if(interface == nil || interface.length == 0) {
+        // accept on ANY address
+        struct sockaddr_in nativeAddr4;
+        nativeAddr4.sin_len = sizeof(struct sockaddr_in);
+        nativeAddr4.sin_family = AF_INET;
+        nativeAddr4.sin_port = HTONS(port);
+        nativeAddr4.sin_addr.s_addr = htonl(INADDR_ANY);
+        memset(&(nativeAddr4.sin_zero), 0, sizeof(nativeAddr4.sin_zero));
+
+        struct sockaddr_in6 nativeAddr6;
+        nativeAddr6.sin6_len = sizeof(struct sockaddr_in6);
+        nativeAddr6.sin6_family = AF_INET6;
+        nativeAddr6.sin6_port = htons(port);
+        nativeAddr6.sin6_flowinfo = 0;
+        nativeAddr6.sin6_addr = in6addr_any;
+        nativeAddr6.sin6_scope_id = 0;
+        
+        // wrap the native address structures for CFSocketSetAddress.
+        address4 = [NSData dataWithBytes:&nativeAddr4 length:sizeof(nativeAddr4)];
+        address6 = [NSData dataWithBytes:&nativeAddr6 length:sizeof(nativeAddr6)];
+    }
+    else if([interface isEqualToString:@"localhost"] || [interface isEqualToString:@"lookback"]) {
+        // accept only on LOOPBACK address
+        struct sockaddr_in nativeAddr4;
+        nativeAddr4.sin_len = sizeof(struct sockaddr_in);
+        nativeAddr4.sin_family = AF_INET;
+        nativeAddr4.sin_port = htons(port);
+        nativeAddr4.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        memset(&(nativeAddr4.sin_zero), 0, sizeof(nativeAddr4.sin_zero));
+        
+        struct sockaddr_in6 nativeAddr6;
+        nativeAddr6.sin6_len = sizeof(struct sockaddr_in6);
+        nativeAddr6.sin6_family = AF_INET6;
+        nativeAddr6.sin6_port = htons(port);
+        nativeAddr6.sin6_flowinfo = 0;
+        nativeAddr6.sin6_addr = in6addr_loopback;
+        nativeAddr6.sin6_scope_id = 0;
+        
+        // wrap the native address structures for CFSocketSetAddress.
+        address4 = [NSData dataWithBytes:&nativeAddr4 length:sizeof(nativeAddr4)];
+        address6 = [NSData dataWithBytes:&nativeAddr6 length:sizeof(nativeAddr6)];
+    }
+    else {
+        NSString *portStr = [NSString stringWithFormat:@"%hu", port];
+        
+        struct addrinfo hints, *res, *res0;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = PF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        hints.ai_flags = AI_PASSIVE;
+        
+        int error = getaddrinfo(interface.UTF8String, portStr.UTF8String, &hints, &res0);
+        if(error) {
+            if(errPtr) {
+                NSString *errMsg = [NSString stringWithCString:gai_strerror(error) encoding:NSASCIIStringEncoding];
+                NSDictionary *info = [NSDictionary dictionaryWithObject:errMsg forKey:NSLocalizedDescriptionKey];
+                
+                *errPtr = [NSError errorWithDomain:@"kCFStreamErrorDomainNetDB" code:error userInfo:info];
+            }
+        }
+        else {
+            for(res=res0; res; res=res->ai_next) {
+                if(!address4 && res->ai_family == AF_INET) {
+                    // found IPv4 address
+                    // wrap the native address structures for CFSocketSetAddress.
+                    address4 = [NSData dataWithBytes:res->ai_addr length:res->ai_addrlen];
+                }
+                else if(!address6 && res->ai_family == AF_INET6) {
+                    // found IPv6 address
+                    address6 = [NSData dataWithBytes:res->ai_addr length:res->ai_addrlen];
+                }
+            }
+            freeaddrinfo(res0);
+        }
+        
+        if(!address4 && !address6) return NO;
+    }
+    
+    // create the sockets.
+    if(address4) {
+        _theSocket4 = [self newAcceptSocketForAddress:address4 error:errPtr];
+        if(_theSocket == NULL) goto Failed;
+    }
+    if(address6) {
+        _theSocket6 = [self newAcceptSocketForAddress:address6 error:errPtr];
+#if !TARGET_OS_IPHONE
+        if(_theSocket6 == NULL) goto Failed;
+    
+#endif
+    }
+    
+    // Attach the sockets to the run loop so that callback methods work
+    [self attachSocketsToRunLoop:nil error:nil];
+    
+    // Set the OS_REUSEADDR flags.
+    int reuseOn = 1;
+    if(_theSocket4) setsockopt(CFSocketGetNative(_theSocket4), SOL_SOCKET, SO_REUSEADDR, &reuseOn, sizeof(reuseOn));
+    if(_theSocket6) setsockopt(CFSocketGetNative(_theSocket6), SOL_SOCKET, SO_REUSEADDR, &reuseOn, sizeof(reuseOn));
+    
+    // set the local binding which acuses the sockets to start listening.
+    
+    CFSocketError err;
+    if(_theSocket4) {
+        err = CFSocketSetAddress(_theSocket4, (__bridge CFDataRef)address4);
+        if(err != kCFSocketSuccess) goto Failed;
+        
+    }
+    
+    if(port == 0 && _theSocket4 && _theSocket6) {
+        // The user has passed in port 0, which means he wants to allow the kernel to choose the port for them
+        // However, the kernel will choose a different port for both theSocket4 and theSocket6
+        // So we grab the port the kernel choose for theSocket4, and set it as the port for theSocket6
+        UInt16 chosePort = [self localPortFromCFSocket4:_theSocket4];
+        
+        struct sockaddr_in6 *pSockAddr6 = (struct sockaddr_in6 *)[address6 bytes];
+        if(pSockAddr6) // if statement to quiet the static analyzer
+        {
+            pSockAddr6->sin6_port = htons(chosePort);
+        }
+    }
+    
+    if(_theSocket6) {
+        err = CFSocketSetAddress(_theSocket6, (__bridge CFDataRef)address6);
+        if(err != kCFSocketSuccess) goto Failed;
+    }
+    
+    _theFlags |= kDidStartDelegate;
+    return YES;
+    
+Failed:
+    if(errPtr) *errPtr = [self getSocketError];
+    if(_theSocket4 == NULL) {
+        CFSocketInvalidate(_theSocket4);
+        CFRelease(_theSocket4);
+        _theSocket4 = NULL;
+    }
+    
+    if(_theSocket6 == NULL) {
+        CFSocketInvalidate(_theSocket6);
+        CFRelease(_theSocket6);
+        _theSocket6 = NULL;
+    }
+    
+    return NO;
+}
 
 #pragma mark Connecting
 - (BOOL)connectToHost:(NSString *)hostname onPort:(UInt16)port error:(NSError **)errPtr {
@@ -456,6 +626,51 @@ static void MyCFWriteStreamCallback(CFWriteStreamRef stream, CFStreamEventType t
     _theFlags |= kDidStartDelegate;
     
     return YES;
+Failed:
+    [self close];
+    return NO;
+}
+
+- (BOOL)connectToAddress:(NSData *)remoteAddress error:(NSError **)errPtr {
+    return [self connectToAddress:remoteAddress withTimeout:-1 error:errPtr];
+}
+
+- (BOOL)connectToAddress:(NSData *)remoteAddress withTimeout:(NSTimeInterval)timeout error:(NSError **)errPtr {
+    return [self connectToAddress:remoteAddress viaInterfaceAddress:nil withTimeout:timeout error:errPtr];
+}
+
+/**
+ * This method is similar to the one above, but allows you to specify which socket interface
+ * the connection should run over. E.g. ethernet, wifi, bluetooth, etc.
+ **/
+- (BOOL)connectToAddress:(NSData *)remoteAddress viaInterfaceAddress:(NSData *)interfaceAddress withTimeout:(NSTimeInterval)timeout error:(NSError **)errPtr {
+    if(_theDelegate == NULL) {
+        [NSException raise:AsyncSocketException format:@"Attempting to connect without a delegate. Set a delegate first."];
+    }
+    
+    if(![self isDisconnected]) {
+        [NSException raise:AsyncSocketException format:@"Attempting to connect while connected or accepting connections. Disconnect first."];
+    }
+    
+    // clear Queues (spurious read/write requests post disconnect)
+    [self emptyQueues];
+    
+    if(![self createSocketForAddress:remoteAddress error:errPtr])
+        goto Failed;
+    if(![self bindSocketToAddress:interfaceAddress error:errPtr])
+        goto Failed;
+    if(![self attachSocketsToRunLoop:nil error:errPtr])
+        goto Failed;
+    if(![self configureSocketAndReturnError:errPtr])
+        goto Failed;
+    if(![self connectSocketToAddress:remoteAddress error:errPtr])
+        goto Failed;
+    
+    [self startConnectTimeout:timeout];
+    _theFlags |= kDidStartDelegate;
+        
+    return YES;
+
 Failed:
     [self close];
     return NO;
@@ -970,6 +1185,27 @@ Failed:
     if(_theWriteStream) return NO;
     
     return YES;
+}
+
+- (UInt16)localPortFromCFSocket4:(CFSocketRef)theSocket {
+    CFDataRef selfaddr;
+    UInt16 selfport = 0;
+    
+    if((selfaddr = CFSocketCopyAddress(theSocket))) {
+        struct sockaddr_in *pSockAddr = (struct sockaddr_in *)CFDataGetBytePtr(selfaddr);
+        selfport = [self portFromAddress4:pSockAddr];
+        CFRelease(selfaddr);
+    }
+    
+    return selfport;
+}
+
+- (UInt16)portFromAddress4:(struct sockaddr_in *)pSockaddr4 {
+    return ntohs(pSockaddr4->sin_port);
+}
+
+- (UInt16)portFromAddress6:(struct sockaddr_in6 *)pSockaddr6 {
+    return ntohs(pSockaddr6->sin6_port);
 }
 
 #pragma mark Accessors
