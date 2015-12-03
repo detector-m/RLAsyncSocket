@@ -428,7 +428,56 @@ static void MyCFWriteStreamCallback(CFWriteStreamRef stream, CFStreamEventType t
 #pragma mark Accepting
 
 #pragma mark Connecting
+- (BOOL)connectToHost:(NSString *)hostname onPort:(UInt16)port error:(NSError **)errPtr {
+    return [self connectToHost:hostname onPort:port withTimeout:-1 error:errPtr];
+}
 
+- (BOOL)connectToHost:(NSString *)hostname onPort:(UInt16)port withTimeout:(NSTimeInterval)timeout error:(NSError **)errPtr {
+    if(_theDelegate == NULL) {
+        [NSException raise:AsyncSocketException format:@"Attempting to connect without a delegate. Set a delegate first"];
+    }
+    if(![self isDisconnected]) {
+        [NSException raise:AsyncSocketException format:@"Attempting to connect while connected or accepting connections. DisConnect first"];
+    }
+    
+    // clear queues (spurious read/write requests post disconnect)
+    [self emptyQueues];
+    
+    if(![self createStreamsToHost:hostname onPort:port error:errPtr])
+        goto Failed;
+    if(![self attachStreamsToRunLoop:nil error:errPtr])
+        goto Failed;
+    if(![self configureSocketAndReturnError:errPtr])
+        goto Failed;
+    if(![self openStreamsAndReturnError:errPtr])
+        goto Failed;
+    
+    [self startConnectTimeout:timeout];
+    _theFlags |= kDidStartDelegate;
+    
+    return YES;
+Failed:
+    [self close];
+    return NO;
+}
+
+- (void)startConnectTimeout:(NSTimeInterval)timeout {
+    if(timeout >= 0.0) {
+        _theConnectTimer = [NSTimer timerWithTimeInterval:timeout target:self selector:@selector(doConnectTimeout:) userInfo:nil repeats:NO];
+        
+        [self runLoopAddTimer:_theConnectTimer];
+    }
+}
+- (void)endConnectTimout {
+    [_theConnectTimer invalidate], _theConnectTimer = nil;
+}
+
+- (void)doConnectTimeout:(__unused NSTimer *)timer {
+#pragma unused(timer)
+    
+    [self endConnectTimout];
+    [self closeWithError:[self getconnectTimeoutError]];
+}
 #pragma mark Socekt Implementation
 
 - (BOOL)createSocketForAddress:(NSData *)remoteAddr error:(NSError **)errPtr {
@@ -678,8 +727,59 @@ static void MyCFWriteStreamCallback(CFWriteStreamRef stream, CFStreamEventType t
     return YES;
 }
 
+- (BOOL)createStreamsToHost:(NSString *)hostname onPort:(UInt16)port error:(NSError **)errPtr {
+    // create the socket & streams
+    CFStreamCreatePairWithSocketToHost(NULL, (__bridge CFStringRef)hostname, port, &_theReadStream, &_theWriteStream);
+    if(_theWriteStream == NULL ||   _theReadStream == NULL ) {
+        if(errPtr) *errPtr = [self getStreamError];
+        
+        return NO;
+    }
+    
+    // ensure the CF & BSD socket is closed when the streams are closed
+    CFReadStreamSetProperty(_theReadStream, kCFStreamPropertyShouldCloseNativeSocket, kCFBooleanTrue);
+    CFWriteStreamSetProperty(_theWriteStream, kCFStreamPropertyShouldCloseNativeSocket, kCFBooleanTrue);
+    
+    return YES;
+}
+
 - (BOOL)attachStreamsToRunLoop:(NSRunLoop *)runLoop error:(NSError **)errPtr {
-    return NO;
+    // get the CFRunLoop to which the socket should be attached
+    _theRunLoop = (runLoop == nil) ? CFRunLoopGetCurrent() : [runLoop getCFRunLoop];
+    
+    // setup read stream callbacks
+    CFOptionFlags readStreamEvents = kCFStreamEventHasBytesAvailable | kCFStreamEventErrorOccurred |
+        kCFStreamEventEndEncountered |
+        kCFStreamEventOpenCompleted;
+    if(!CFReadStreamSetClient(_theReadStream, readStreamEvents, (CFReadStreamClientCallBack)&MyCFReadStreamCallback, (CFStreamClientContext *)(&_theContext))) {
+        NSError *err = [self getStreamError];
+        
+        NSLog(@"AsyncSocket %p couldn't attach read stream to run-loop,", self);
+        NSLog(@"Error: %@", err);
+        
+        if(errPtr) *errPtr = err;
+        return NO;
+    }
+    
+    // setup write stream callbacks
+    CFOptionFlags writeStreamEvents = kCFStreamEventCanAcceptBytes | kCFStreamEventErrorOccurred | kCFStreamEventEndEncountered | kCFStreamEventOpenCompleted;
+    
+    if(!CFWriteStreamSetClient(_theWriteStream, writeStreamEvents, (CFWriteStreamClientCallBack)&MyCFWriteStreamCallback, (CFStreamClientContext *)(&_theContext))) {
+        NSError *err = [self getStreamError];
+        NSLog (@"AsyncSocket %p couldn't attach write stream to run-loop,", self);
+        NSLog (@"Error: %@", err);
+        
+        if (errPtr) *errPtr = err;
+        return NO;
+    }
+    
+    // add read and write streams to run loop
+    for(NSString *runLoopMode in _theRunLoopModes) {
+        CFReadStreamScheduleWithRunLoop(_theReadStream, _theRunLoop, (__bridge CFStringRef)runLoopMode);
+        CFWriteStreamScheduleWithRunLoop(_theWriteStream, _theRunLoop, (__bridge CFStringRef)runLoopMode);
+    }
+    
+    return YES;
 }
 
 - (BOOL)openStreamsAndReturnError:(NSError **)errPtr {
@@ -725,6 +825,16 @@ static void MyCFWriteStreamCallback(CFWriteStreamRef stream, CFStreamEventType t
 - (void)close {
 
 }
+
+- (void)disconnect {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    [self close];
+}
+
+
 
 #pragma mark errors
 - (NSError *)getErrnoError {
@@ -842,6 +952,24 @@ static void MyCFWriteStreamCallback(CFWriteStreamRef stream, CFStreamEventType t
     }
     
     return [NSError errorWithDomain:domain code:err.error userInfo:info];
+}
+
+#pragma mark Diagnostics
+- (BOOL)isDisconnected {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    if(_theNativeSocket4 > 0) return NO;
+    if(_theNativeSocket6 > 0) return NO;
+    
+    if(_theSocket4) return NO;
+    if(_theSocket6) return NO;
+    
+    if(_theReadStream) return NO;
+    if(_theWriteStream) return NO;
+    
+    return YES;
 }
 
 #pragma mark Accessors
