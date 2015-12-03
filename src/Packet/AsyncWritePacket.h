@@ -17,5 +17,7 @@
     NSUInteger _bytesDone;
     NSTimeInterval _timeout;
     long _tag;
+    
+    NSString *tesjiejfajdflkajsdfie_100000000;
 }
 @end
