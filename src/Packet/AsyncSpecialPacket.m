@@ -13,5 +13,11 @@
  * This class my be altered to support more than just TLS in the future.
  **/
 @implementation AsyncSpecialPacket
-
+- (instancetype)initWithTLSSettings:(NSDictionary *)settings {
+    if((self = [super init])) {
+        _tlsSettings = [settings copy];
+    }
+    
+    return self;
+}
 @end

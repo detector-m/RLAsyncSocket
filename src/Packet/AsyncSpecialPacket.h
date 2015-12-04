@@ -15,7 +15,8 @@
  **/
 @interface AsyncSpecialPacket : NSObject {
 @public
-    NSDictionary *tlsSettings;
+    NSDictionary *_tlsSettings;
 }
 
+- (instancetype)initWithTLSSettings:(NSDictionary *)settings;
 @end

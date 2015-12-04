@@ -18,4 +18,6 @@
     NSTimeInterval _timeout;
     long _tag;
 }
+
+- (instancetype)initWithData:(NSData *)d timeout:(NSTimeInterval)t tag:(long)i;
 @end

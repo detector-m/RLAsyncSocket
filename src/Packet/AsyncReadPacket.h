@@ -23,11 +23,23 @@
     NSUInteger _maxLength;
     NSTimeInterval _timeout;
     NSUInteger _readLength;
-    NSData *term;
+    NSData *_term;
     BOOL _bufferOwner;
     NSUInteger _originalBufferLength;
     long _tag;
 }
 
+- (instancetype)initWithData:(NSMutableData *)d
+                 startOffset:(NSUInteger)s
+                   maxLength:(NSUInteger)m
+                     timeout:(NSTimeInterval)t
+                  readLength:(NSUInteger)l
+                  terminator:(NSData *)e
+                         tag:(long)i;
+- (NSUInteger)readLengthForNonTerm;
+- (NSUInteger)readLengthForTerm;
+- (NSUInteger)readLengthForTermWithPreBuffer:(NSData *)preBuffer found:(BOOL *)foundPtr;
 
+- (NSUInteger)prebufferReadLengthForTerm;
+- (NSUInteger)searchForTermAfterPreBuffering:(NSUInteger)numBytes;
 @end

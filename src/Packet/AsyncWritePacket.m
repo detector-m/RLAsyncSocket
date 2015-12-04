@@ -12,5 +12,14 @@
  * The AsyncWritePacket encompasses the instructions for any given write.
  **/
 @implementation AsyncWritePacket
-
+- (instancetype)initWithData:(NSData *)d timeout:(NSTimeInterval)t tag:(long)i {
+    if((self = [super init])) {
+        _buffer = d;
+        _timeout = t;
+        _tag = i;
+        _bytesDone = 0;
+    }
+    
+    return self;
+}
 @end
