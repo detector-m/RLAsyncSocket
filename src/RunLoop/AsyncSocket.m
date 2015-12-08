@@ -1571,6 +1571,20 @@ Failed:
 
 #pragma mark Writing
 
+- (void)writeData:(NSData *)data withTimeout:(NSTimeInterval)timeout tag:(long)tag {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    if(data == nil || data.length == 0) return;
+    if(_theFlags & kForbidReadsWrites) return;
+    
+    AsyncWritePacket *packet = [[AsyncWritePacket alloc] initWithData:data timeout:timeout tag:tag];
+    
+    [_theWriteQueue addObject:packet];
+    [self scheduleDequeueWrite];
+}
+
 - (void)scheduleDequeueWrite {
     if((_theFlags & kDequeueWriteScheduled) == 0) {
         _theFlags |= kDequeueWriteScheduled;
@@ -1578,8 +1592,161 @@ Failed:
     }
 }
 
+/**
+ * Conditionally starts a new write.
+ *
+ * IF there is not another write in process
+ * AND there is a write queued
+ * AND we have a write stream available
+ *
+ * This method also handles auto-disconnect post read/write completion.
+ **/
 - (void)maybeDequeueWrite {
+    // unset the flag indicating a call to this method is scheduled
+    _theFlags &= ~kDequeueWriteScheduled;
     
+    // if we're not currently processing a write and we have an available write stream
+    if(_theCurrentWrite==nil && _theWriteStream != NULL) {
+        if(_theWriteQueue.count > 0) {
+            //dequeue the next object in the write queue
+            _theCurrentWrite = [_theWriteQueue objectAtIndex:0];
+            [_theWriteQueue removeObjectAtIndex:0];
+            
+            if([_theCurrentWrite isKindOfClass:[AsyncSpecialPacket class]]) {
+                // attempt to start tls
+                _theFlags |= kStartingWriteTLS;
+                //this method won't do anything unless both kStartingReadTLS and kStartingWriteTLS are set
+                [self maybeStartTLS];
+            }
+            else {
+                // start time-out timer
+                if(_theCurrentWrite->_timeout >= 0.0) {
+                    _theWriteTimer = [NSTimer timerWithTimeInterval:_theCurrentWrite->_timeout target:self selector:@selector(doWriteTimeout:) userInfo:nil repeats:NO];
+                    [self runLoopAddTimer:_theWriteTimer];
+                }
+                
+                // immediately write, if possible
+                [self doSendBytes];
+            }
+        }
+        else if(_theFlags & kDisconnectAfterWrites) {
+            if(_theFlags & kDisconnectAfterReads) {
+                if(_theReadQueue.count == 0 && _theCurrentRead == nil) {
+                    [self disconnect];
+                }
+            }
+            else {
+                [self disconnect];
+            }
+        }
+    }
+}
+
+/**
+ * Call this method in doSendBytes instead of CFWriteStreamCanAcceptBytes().
+ * This method supports the kSocketCanAcceptBytes flag.
+ **/
+- (BOOL)canAcceptBytes {
+    if(_theFlags & kSocketCanAcceptBytes) {
+        return YES;
+    }
+    else
+        return CFWriteStreamCanAcceptBytes(_theWriteStream);
+}
+
+- (void)doSendBytes {
+    if(_theCurrentWrite == nil || _theWriteStream == NULL) {
+        return;
+    }
+    
+    // note: This method is not called if _theCurrentWrite is an AsyncSpecialPacket (startTLS packet)
+    NSUInteger totalBytesWritten = 0;
+    
+    BOOL done = NO;
+    BOOL error = NO;
+    
+    while(!done && !error && [self canAcceptBytes]) {
+        // figure out what to write
+        NSUInteger bytesRemaining = _theCurrentWrite->_buffer.length - _theCurrentWrite->_bytesDone;
+        NSUInteger bytesToWrite = (bytesRemaining < WRITE_CHUNKSIZE) ? bytesRemaining : WRITE_CHUNKSIZE;
+        
+        UInt8 *writestart = (UInt8 *)([_theCurrentWrite->_buffer bytes] + _theCurrentWrite->_bytesDone);
+        
+        // write
+        CFIndex result = CFWriteStreamWrite(_theWriteStream, writestart, bytesToWrite);
+        
+        // unset the "can accept bytes" flags
+        _theFlags &= ~kSocketCanAcceptBytes;
+        
+        // Check results
+        if(result < 0) error = YES;
+        else {
+            CFIndex bytesWritten = result;
+            
+            // update total amount read for the current write
+            _theCurrentWrite->_bytesDone += bytesWritten;
+            
+            // update total amount written in this method invacation
+            totalBytesWritten += bytesWritten;
+            
+            // is packet done?
+            done = (_theCurrentWrite->_buffer.length == _theCurrentWrite->_bytesDone);
+        }
+    }
+    
+    if(done) {
+        [self completeCurrentWrite];
+        [self scheduleDequeueWrite];
+    }
+    else if(error) {
+        CFStreamError err = CFWriteStreamGetError(_theWriteStream);
+        [self closeWithError:[self errorFromCFStreamError:err]];
+        return;
+    }
+    else if(totalBytesWritten > 0) {
+        // we're not done with the entire write, but we have written some bytes
+        if([_theDelegate respondsToSelector:@selector(onSocket:didWritePartialDataOfLength:tag:)]) {
+            [_theDelegate onSocket:self didWritePartialDataOfLength:totalBytesWritten tag:_theCurrentWrite->_tag];
+        }
+    }
+}
+
+// ends current write and class delegate
+- (void)completeCurrentWrite {
+    NSAssert(_theCurrentWrite, @"Trying to complete current write when there is no current write.");
+    
+    if([_theDelegate respondsToSelector:@selector(onSocket:didWriteDataWithTag:)]) {
+        [_theDelegate onSocket:self didWriteDataWithTag:_theCurrentWrite->_tag];
+    }
+    
+    if(_theCurrentWrite != nil) [self endCurrentWrite]; // caller may have disconnected.
+}
+
+// ends current write.
+- (void)endCurrentWrite {
+    NSAssert(_theCurrentWrite, @"Trying to complete current write when there is no current write.");
+    
+    [_theWriteTimer invalidate], _theWriteTimer = nil;
+    _theCurrentWrite = nil;
+}
+
+- (void)doWriteTimeout:(__unused NSTimer *)timer {
+#pragma unused(timer)
+    
+    NSTimeInterval timeoutExtension = 0.0;
+    
+    if([_theDelegate respondsToSelector:@selector(onSocket:shouldTimeoutWriteWithTag:elapsed:bytesDone:)]) {
+        timeoutExtension = [_theDelegate onSocket:self shouldTimeoutWriteWithTag:_theCurrentWrite->_tag elapsed:_theCurrentWrite->_timeout bytesDone:_theCurrentWrite->_bytesDone];
+    }
+    
+    if(timeoutExtension > 0.0) {
+        _theCurrentWrite->_timeout += timeoutExtension;
+        
+        _theWriteTimer = [NSTimer timerWithTimeInterval:timeoutExtension target:self selector:@selector(doWriteTimeout:) userInfo:nil repeats:NO];
+        
+        [self runLoopAddTimer:_theWriteTimer];
+    }
+    else [self closeWithError:[self getWriteTimeoutError]];
 }
 
 #pragma mark Security
@@ -1775,18 +1942,89 @@ Failed:
     return YES;
 }
 
+- (BOOL)isConnected {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    return [self areStreamsConnected];
+}
+
 - (NSString *)connectedHost {
 #if DEBUG_THREAD_SAFETY
     [self checkForThreadSafety];
 #endif
     
-//    if(_theSocket4) return [self connectedHostFromCFSocket]
+    if(_theSocket4) return [self connectedHostFromCFSocket4:_theSocket4];
+    if(_theSocket6) return [self connectedHostFromCFSocket6:_theSocket6];
+    
+    if(_theNativeSocket4 > 0) {
+        return [self connectedHostFromNativeSocket4:_theNativeSocket4];
+    }
+    if(_theNativeSocket6 > 0) {
+        return [self connectedHostFromNativeSocket6:_theNativeSocket6];
+    }
     
     return nil;
 }
 
 - (UInt16)connectedPort {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    
     return 0;
+}
+
+- (NSString *)connectedHostFromNativeSocket4:(CFSocketNativeHandle)theNativeSocket {
+    struct sockaddr_in sockaddr4;
+    socklen_t sockaddr4len = sizeof(sockaddr4);
+    
+    if(getpeername(theNativeSocket, (struct sockaddr *)&sockaddr4, &sockaddr4len) < 0) {
+        return nil;
+    }
+    
+    return [self hostFromAddress4:&sockaddr4];
+}
+
+- (NSString *)connectedHostFromNativeSocket6:(CFSocketNativeHandle)theNativeSocket {
+    struct sockaddr_in6 sockaddr6;
+    socklen_t sockaddr6len = sizeof(sockaddr6);
+    
+    if(getpeername(theNativeSocket, (struct sockaddr *)&sockaddr6, &sockaddr6len) < 0) {
+        return nil;
+    }
+    
+    return [self hostFromAddress6:&sockaddr6];
+}
+
+- (NSString *)connectedHostFromCFSocket4:(CFSocketRef)theSocket {
+    CFDataRef peeraddr;
+    NSString *peerstr = nil;
+    
+    if((peeraddr = CFSocketCopyPeerAddress(theSocket))) {
+        struct sockaddr_in *pSockAddr = (struct sockaddr_in *)CFDataGetBytePtr(peeraddr);
+        
+        peerstr = [self hostFromAddress4:pSockAddr];
+        CFRelease(peeraddr);
+    }
+    
+    return peerstr;
+}
+
+- (NSString *)connectedHostFromCFSocket6:(CFSocketRef)theSocket {
+    CFDataRef peeraddr;
+    NSString *peerstr = nil;
+    
+    if((peeraddr = CFSocketCopyPeerAddress(theSocket))) {
+        struct sockaddr_in6 *pSockAddr = (struct sockaddr_in6 *)CFDataGetBytePtr(peeraddr);
+        
+        peerstr = [self hostFromAddress6:pSockAddr];
+        CFRelease(peeraddr);
+    }
+    
+    return peerstr;
 }
 
 - (UInt16)localPortFromCFSocket4:(CFSocketRef)theSocket {
@@ -1802,12 +2040,59 @@ Failed:
     return selfport;
 }
 
+- (NSString *)hostFromAddress4:(struct sockaddr_in *)pSockaddr4 {
+    char addrBuf[INET_ADDRSTRLEN];
+    
+    if(inet_ntop(AF_INET, &pSockaddr4->sin_addr, addrBuf, (socklen_t)sizeof(addrBuf)) == NULL) {
+        [NSException raise:NSInternalInconsistencyException format:@"Cannot convert IPv4 address to string."];
+    }
+    
+    return [NSString stringWithCString:addrBuf encoding:NSASCIIStringEncoding];
+}
+
+- (NSString *)hostFromAddress6:(struct sockaddr_in6 *)pSockaddr6 {
+    char addrBuf[INET6_ADDRSTRLEN];
+    
+    if(inet_ntop(AF_INET6, &pSockaddr6->sin6_addr, addrBuf, (socklen_t)sizeof(addrBuf)) == NULL) {
+        [NSException raise:NSInternalInconsistencyException format:@"Cannot convert IPv6 address to string."];
+    }
+    
+    return [NSString stringWithCString:addrBuf encoding:NSASCIIStringEncoding];
+}
+
 - (UInt16)portFromAddress4:(struct sockaddr_in *)pSockaddr4 {
     return ntohs(pSockaddr4->sin_port);
 }
 
 - (UInt16)portFromAddress6:(struct sockaddr_in6 *)pSockaddr6 {
     return ntohs(pSockaddr6->sin6_port);
+}
+
+- (BOOL)areStreamsConnected {
+    CFStreamStatus s;
+    
+    if(_theReadStream != NULL) {
+        s = CFReadStreamGetStatus(_theReadStream);
+        if(!(s == kCFStreamStatusOpen || s == kCFStreamStatusReading || s == kCFStreamStatusError)) {
+            return NO;
+        }
+    }
+    else return NO;
+    
+    if(_theWriteStream != NULL) {
+        s = CFWriteStreamGetStatus(_theWriteStream);
+        if(!(s == kCFStreamStatusOpen || s == kCFStreamStatusWriting || s == kCFStreamStatusError)) return NO;
+    }
+    else return NO;
+    
+    return YES;
+}
+
+- (NSString *)description {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
 }
 
 #pragma mark Accessors
