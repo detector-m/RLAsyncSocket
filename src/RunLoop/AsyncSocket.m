@@ -532,7 +532,7 @@ static void MyCFWriteStreamCallback(CFWriteStreamRef stream, CFStreamEventType t
     // create the sockets.
     if(address4) {
         _theSocket4 = [self newAcceptSocketForAddress:address4 error:errPtr];
-        if(_theSocket == NULL) goto Failed;
+        if(_theSocket4 == NULL) goto Failed;
     }
     if(address6) {
         _theSocket6 = [self newAcceptSocketForAddress:address6 error:errPtr];
@@ -1252,12 +1252,391 @@ Failed:
  * or when a stream opens that may have requested reads sitting in the queue, etc.
  **/
 - (void)maybeDequeueRead {
+    // unset the flag indicating a call to this method is scheduled
+    _theFlags &= ~kDequeueReadScheduled;
+    
+    //if we're not currently processing a read AND we hava an available read stream.
+    if(_theCurrentRead == nil && _theReadStream != NULL) {
+        if(_theReadQueue.count > 0) {
+            // dequeue the next object in the write queue
+            _theCurrentRead = [_theReadQueue objectAtIndex:0];
+            [_theReadQueue removeObjectAtIndex:0];
+            if([_theReadQueue isKindOfClass:[AsyncSpecialPacket class]]) {
+                // Attempt to start TLS
+                _theFlags |= kStartingReadTLS;
+                // This method won't do anything unless both kStartingReadTLS and kStartingWriteTLS are set
+                [self maybeStartTLS];
+            }
+            else {
+                // start time-out timer
+                if(_theCurrentRead->_timeout > 0.0) {
+                    _theReadTimer = [NSTimer timerWithTimeInterval:_theCurrentRead->_timeout target:self selector:@selector(doReadTimeout:) userInfo:nil repeats:NO];
+                    [self runLoopAddTimer:_theReadTimer];
+                }
+                
+                // Immediately read, if possible
+                [self doBytesAvailable];
+            }
+        }
+        else if(_theFlags & kDisconnectAfterReads) {
+            if(_theFlags & kDisconnectAfterWrites) {
+                if(_theWriteQueue.count == 0 && _theCurrentWrite == nil) {
+                    [self disconnect];
+                }
+            }
+            else
+                [self disconnect];
+        }
+    }
+}
 
+/**
+ * Call this method in doBytesAvailable instead of CFReadStreamHasBytesAvailable().
+ * This method supports pre-buffering properly as well as the kSocketHasBytesAvailable flag.
+ **/
+- (BOOL)hasBytesAvailable {
+    if((_theFlags & kSocketHasBytesAvailable) || (_partialReadBuffer.length > 0)) {
+        return YES;
+    }
+    else
+        return CFReadStreamHasBytesAvailable(_theReadStream);
+}
+
+/**
+ * Call this method in doBytesAvailable instead of CFReadStreamRead().
+ * This method support pre-buffering properly.
+ **/
+- (CFIndex)readIntoBuffer:(void *)buffer maxLength:(NSUInteger)length {
+    if(_partialReadBuffer.length > 0) {
+        // determine the maximum amount of data to read
+        NSUInteger bytesToRead = MIN(length, _partialReadBuffer.length);
+        
+        // copy the bytes from the partial read buffer
+        memcpy(buffer, [_partialReadBuffer bytes], (size_t)bytesToRead);
+        
+        //remove the copied bytes from the partial read buffer
+        [_partialReadBuffer replaceBytesInRange:NSMakeRange(0, bytesToRead) withBytes:NULL length:0];
+        
+        return (CFIndex)bytesToRead;
+    }
+    else {
+        // unset the has-bytes-available flag
+        _theFlags &= ~kSocketHasBytesAvailable;
+        
+        return CFReadStreamRead(_theReadStream, (UInt8 *)buffer, length);
+    }
+}
+
+- (void)doBytesAvailable {
+    // if data is available on the stream, but there is no read request, then we don't need to process the data yet.
+    // also. if there is a read request but no read stream setup, we can't process any data yet.
+    if(_theCurrentRead == nil || _theReadStream == NULL)  return;
+    
+    // Note: this method is not called if _theCurrentRead is an AsyncSpecialPacket (startTLSPacket)
+    
+    NSUInteger totalBytesRead = 0;
+    
+    BOOL done = NO;
+    BOOL socketError = NO;
+    BOOL maxoutError = NO;
+    
+    while (!done && !socketError && !maxoutError && [self hasBytesAvailable]) {
+        BOOL didPreBuffer = NO;
+        BOOL didReadFromPreBuffer = NO;
+        
+        // there are 3 types of read packets;
+        /*
+         1.read all available data
+         2.read a specific length of data
+         3.read up to a partucular terminator.
+         */
+        
+        NSUInteger bytesToRead;
+        if(_theCurrentRead->_term != nil) {
+            // Read type #3 - read up to a terminator
+            //
+            // If pre-buffering is enabled we'll read a chunk and search for the terminator.
+            // If the terminator is found, overflow data will be placed in the partialReadBuffer for the next read.
+            //
+            // If pre-buffering is disabled we'll be forced to read only a few bytes.
+            // Just enough to ensure we don't go past our term or over our max limit.
+            //
+            // If we already have data pre-buffered, we can read directly from it.
+            
+            if(_partialReadBuffer.length > 0) {
+                didReadFromPreBuffer = YES;
+                bytesToRead = [_theCurrentRead readLengthForTermWithPreBuffer:_partialReadBuffer found:&done];
+            }
+            else {
+                if(_theFlags & kEnablePreBuffering) {
+                    didPreBuffer = YES;
+                    bytesToRead = [_theCurrentRead prebufferReadLengthForTerm];
+                }
+                else {
+                    bytesToRead = [_theCurrentRead readLengthForNonTerm];
+                }
+            }
+        }
+        else {
+            // read type #1 or #2
+            bytesToRead = [_theCurrentRead readLengthForNonTerm];
+        }
+        
+        // Make sure we have enough room in the buffer for our read.
+        NSUInteger buffSize = _theCurrentRead->_buffer.length;
+        NSUInteger buffSpace = buffSize - _theCurrentRead->_startOffset - _theCurrentRead->_bytesDone;
+        
+        if(bytesToRead > buffSpace) {
+            NSUInteger buffInc = bytesToRead - buffSpace;
+            
+        [_theCurrentRead->_buffer increaseLengthBy:buffInc];
+        }
+        
+        // read data into packet buffer
+        
+        void *buffer = [_theCurrentRead->_buffer mutableBytes] + _theCurrentRead->_startOffset;
+        void *subBuffer = buffer + _theCurrentRead->_bytesDone;
+        
+        CFIndex result = [self readIntoBuffer:subBuffer maxLength:bytesToRead];
+        
+        // check results
+        if(result < 0) socketError = YES;
+        else {
+            CFIndex bytesRead = result;
+            
+            //Update total amount read for the current read
+            _theCurrentRead->_bytesDone += bytesRead;
+            
+            // is Packet done?
+            if(_theCurrentRead->_readLength > 0) {
+                // read type #2 - read a specific length of data
+                done = (_theCurrentRead->_bytesDone == _theCurrentRead->_readLength);
+            }
+            else if(_theCurrentRead->_term != nil) {
+                // read type #3 - read up to a terminator
+                if(didPreBuffer) {
+                    // search for the terminating sequence within the big chunk we just read.
+                    NSInteger overflow = [_theCurrentRead searchForTermAfterPreBuffering:result];
+                    
+                    if(overflow > 0) {
+                        // Copy excess data into _partialReadBuffer
+                        void *overflowBuffer = buffer + _theCurrentRead->_bytesDone - overflow;
+                        
+                        [_partialReadBuffer appendBytes:overflowBuffer length:overflow];
+                        
+                        // update the _byteDone variable.
+                        _theCurrentRead->_bytesDone -= overflow;
+                        
+                        // note: the completeCurrentRead method will trim the buffer for us.
+                    }
+                    
+                    done = (overflow >= 0);
+                }
+                else if(didReadFromPreBuffer) {
+                    // our 'done' variable was updated via the readLengthForTermWithPreBuffer:found: method
+                }
+                else {
+                    // search for the terminating sequence at the end of the buffer
+                    
+                    NSUInteger termlen = _theCurrentRead->_term.length;
+                    
+                    if(_theCurrentRead->_bytesDone >= termlen) {
+                        void *bufferEnd = buffer + (_theCurrentRead->_bytesDone - termlen);
+                        
+                        const void *seq = [_theCurrentRead->_term bytes];
+                        done = (memcmp(bufferEnd, seq, termlen) == 0);
+                    }
+                }
+                
+                if(!done && _theCurrentRead->_maxLength > 0) {
+                    // we're not done and there's a set maxLength.
+                    // have we readched that maxLength yet?
+                    if(_theCurrentRead->_bytesDone >= _theCurrentRead->_maxLength) {
+                        maxoutError = YES;
+                    }
+                }
+            }
+            else {
+                // Read type #1 - read all available data
+                // we're done when:
+                // we reach maxLength (if there is a max)
+                // all readable is read (see below)
+                
+                if(_theCurrentRead->_maxLength > 0) {
+                    done = _theCurrentRead->_bytesDone >= _theCurrentRead->_maxLength;
+                }
+            }
+        }
+    }
+    
+    if(_theCurrentRead->_readLength <= 0 && _theCurrentRead->_term == nil) {
+        // Read type #1 - read all available data
+        
+        if(_theCurrentRead->_bytesDone > 0) {
+            // Ran out of bytes, so the "read-all-available-data" type packet is done
+
+            done = YES;
+        }
+    }
+    
+    if(done) {
+        [self completeCurrentRead];
+        if(!socketError) [self scheduleDequeueRead];
+    }
+    else if(totalBytesRead > 0) {
+        // we're not done with the readToLength or readToData yet. but we have read in some bytes.
+        if([_theDelegate respondsToSelector:@selector(onSocket:didReadPartialDataOfLength:tag:)]) {
+            [_theDelegate onSocket:self didReadPartialDataOfLength:totalBytesRead tag:_theCurrentRead->_tag];
+        }
+    }
+    
+    if(socketError) {
+        CFStreamError err = CFReadStreamGetError(_theReadStream);
+        [self closeWithError:[self errorFromCFStreamError:err]];
+        return;
+    }
+    
+    if(maxoutError) {
+        [self closeWithError:[self getReadMaxedOutError]];
+        
+        return;
+    }
+}
+
+// ends current read and calls delegate.
+- (void)completeCurrentRead {
+    NSAssert(_theCurrentRead, @"Trying to complete current read when there is no current read.");
+    
+    NSData *result;
+    if(_theCurrentRead->_bufferOwner) {
+        // We created the buffer on behalf of the user.
+        // Trim our buffer to be the proper size.
+        [_theCurrentRead->_buffer setLength:_theCurrentRead->_bytesDone];
+        
+        result = _theCurrentRead->_buffer;
+    }
+    else {
+        // We did NOT create the buffer.
+        // The buffer is owned by the caller.
+        // Only trim the buffer if we had to increase its size.
+        
+        if(_theCurrentRead->_buffer.length > _theCurrentRead->_originalBufferLength) {
+            NSUInteger readSize = _theCurrentRead->_startOffset + _theCurrentRead->_bytesDone;
+            NSUInteger origSize = _theCurrentRead->_originalBufferLength;
+            
+            NSUInteger buffSize = MAX(readSize, origSize);
+            [_theCurrentRead->_buffer setLength:buffSize];
+        }
+        
+        void *buffer = [_theCurrentRead->_buffer mutableBytes] + _theCurrentRead->_startOffset;
+        
+        result = [NSData dataWithBytesNoCopy:buffer length:_theCurrentRead->_bytesDone freeWhenDone:NO];
+    }
+    
+    if([_theDelegate respondsToSelector:@selector(onSocket:didReadData:withTag:)]) {
+        [_theDelegate onSocket:self didReadData:result withTag:_theCurrentRead->_tag];
+    }
+    
+    // Caller may have disconnected in the above delegate method
+    if(_theCurrentRead != nil) {
+        [self endCurrentRead];
+    }
+}
+//Ends current read.
+- (void)endCurrentRead {
+    NSAssert(_theCurrentRead, @"Trying to end current read when there is no current read.");
+    
+    [_theReadTimer invalidate], _theReadTimer = nil;
+    _theCurrentRead = nil;
+}
+
+- (void)doReadTimeout:(__unused NSTimer *)timer {
+#pragma unused(timer)
+    NSTimeInterval timeoutExtension = 0.0;
+    
+    if([_theDelegate respondsToSelector:@selector(onSocket:shouldTimeoutReadWithTag:elapsed:bytesDone:)]) {
+        timeoutExtension = [_theDelegate onSocket:self shouldTimeoutReadWithTag:_theCurrentRead->_tag elapsed:_theCurrentRead->_timeout bytesDone:_theCurrentRead->_bytesDone];
+    }
+    
+    if(timeoutExtension > 0.0) {
+        _theCurrentRead->_timeout += timeoutExtension;
+        
+        _theReadTimer = [NSTimer timerWithTimeInterval:timeoutExtension target:self selector:@selector(doReadTimeout:) userInfo:nil repeats:NO];
+        [self runLoopAddTimer:_theReadTimer];
+    }
+    else {
+        [self closeWithError:[self getReadTimeoutError]];
+    }
 }
 
 #pragma mark Writing
+
+- (void)scheduleDequeueWrite {
+    if((_theFlags & kDequeueWriteScheduled) == 0) {
+        _theFlags |= kDequeueWriteScheduled;
+        [self performSelector:@selector(maybeDequeueWrite) withObject:nil afterDelay:0 inModes:_theRunLoopModes];
+    }
+}
+
 - (void)maybeDequeueWrite {
     
+}
+
+#pragma mark Security
+- (void)startTLS:(NSDictionary *)tlsSettings {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    if(tlsSettings == nil) {
+        // Passing nil/NULL to CFReadStreamSetProperty will appear to work the same as passing an empty dictionary.
+        // but causes problems if we later try to fetch the remote host's certificate.
+        //
+        // To be exact, it causes the following to return NULL instead of the normal result:
+        // CFReadStreamCopyProperty(readStream, kCFStreamPropertySSLPeerCertificates)
+        //
+        // So we use an empty dictionary instead, which works perfectly.
+            tlsSettings = [NSDictionary dictionary];
+    }
+    
+    AsyncSpecialPacket *packet = [[AsyncSpecialPacket alloc] initWithTLSSettings:tlsSettings];
+    
+    [_theReadQueue addObject:packet];
+    [self scheduleDequeueRead];
+    
+    [_theWriteQueue addObject:packet];
+    [self scheduleDequeueWrite];
+}
+
+- (void)maybeStartTLS {
+    // We can't start TLS until:
+    // - All queued reads prior to the user calling StartTLS are complete
+    // - All queued writes prior to the user calling StartTLS are complete
+    //
+    // We'll know these conditions are met when both kStartingReadTLS and kStartingWriteTLS are set
+    if((_theFlags & kStartingReadTLS) && (_theFlags & kStartingWriteTLS)) {
+        AsyncSpecialPacket *tlsPacket = (AsyncSpecialPacket *)_theCurrentRead;
+        
+        BOOL didStartOnReadStream = CFReadStreamSetProperty(_theReadStream, kCFStreamPropertySSLSettings, (__bridge CFDictionaryRef)tlsPacket->_tlsSettings);
+        BOOL didStartOnWriteStream = CFWriteStreamSetProperty(_theWriteStream, kCFStreamPropertySSLSettings, (__bridge CFDictionaryRef)tlsPacket->_tlsSettings);
+        
+        if(!didStartOnReadStream || !didStartOnWriteStream) {
+            [self closeWithError:[self getSocketError]];
+        }
+    }
+}
+
+- (void)onTLSHandshakeSuccessful {
+    if((_theFlags & kStartingReadTLS) && (_theFlags & kStartingWriteTLS)) {
+        _theFlags &= ~kStartingReadTLS;
+        _theFlags &= ~kStartingWriteTLS;
+        
+        if([_theDelegate respondsToSelector:@selector(onSocketDidSecure:)]) {
+            [_theDelegate onSocketDidSecure:self];
+        }
+        
+        [self endCurrentRead];
+    }
 }
 
 #pragma mark Errors
