@@ -1154,11 +1154,76 @@ Failed:
 }
 
 - (void)emptyQueues {
-//    if(_theCurrentRead != nil) [self end]
+    if(_theCurrentRead != nil) [self endCurrentRead];
+    if(_theCurrentWrite != nil) [self endCurrentWrite];
+    
+    [_theReadQueue removeAllObjects];
+    [_theWriteQueue removeAllObjects];
+    
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(maybeDequeueRead) object:nil];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(maybeDequeueWrite) object:nil];
+    
+    _theFlags &= ~kDequeueReadScheduled;
+    _theFlags &= ~kDequeueWriteScheduled;
 }
 
+/*this is called for both error and clean disconnections*/
 - (void)close {
-
+    // Empty queues.
+    [self emptyQueues];
+    
+    //clear _partialReadBuffer (pre-buffer and also unreadData buffer in case of error)
+    [_partialReadBuffer replaceBytesInRange:NSMakeRange(0, _partialReadBuffer.length) withBytes:NULL length:0];
+    
+    // stop the connection attempt timeout timer
+    if(_theConnectTimer != nil) {
+        [self endConnectTimout];
+    }
+    
+    // close streams
+    if(_theReadStream != NULL) {
+        [self runLoopUnscheduleReadStream];
+        CFReadStreamClose(_theReadStream);
+        CFRelease(_theReadStream), _theReadStream = NULL;
+    }
+    
+    if(_theWriteStream != NULL) {
+        [self runLoopUnscheduleWriteStream];
+        CFWriteStreamClose(_theWriteStream);
+        CFRelease(_theWriteStream), _theWriteStream = NULL;
+    }
+    
+    // close socket
+    _theNativeSocket4 = 0;
+    _theNativeSocket6 = 0;
+    
+    // remove run loop sources
+    if(_theSource4) {
+        [self runLoopRemoveSource:_theSource4];
+        CFRelease(_theSource4), _theSource4 = NULL;
+    }
+    
+    if(_theSource6 != NULL) {
+        [self runLoopRemoveSource:_theSource6];
+        CFRelease(_theSource6), _theSource6 = NULL;
+    }
+    _theRunLoop = NULL;
+    
+    // if the client has pass the connect/accept method, then the connection has at least begun.
+    //notify delegate that it is now ending.
+    BOOL shouldCallDelegate = (BOOL)(_theFlags & kDidStartDelegate);
+    
+    // clear all flags (except the pre-buffering flag, which should remain as is)
+    _theFlags &= kEnablePreBuffering;
+    
+    if(shouldCallDelegate) {
+        if([_theDelegate respondsToSelector:@selector(onSocketDidDisconnect:)]) {
+            [_theDelegate onSocketDidDisconnect:self];
+        }
+    }
+    
+    // do not access any instance variables after calling onSocketDidDisconnect.
+    // this gives the delegate freedom to release us without returning here and crashing.
 }
 
 - (void)disconnect {
@@ -1167,6 +1232,106 @@ Failed:
 #endif
     
     [self close];
+}
+
+//disconnects after pending reads have completed.
+- (void)disconnectAfterReading {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    _theFlags |= (kForbidReadsWrites | kDisconnectAfterReads);
+    
+    [self maybeScheduleDisconnect];
+}
+
+- (void)disconnectAfterWriting {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    _theFlags |= (kForbidReadsWrites | kDisconnectAfterWrites);
+    
+    [self maybeScheduleDisconnect];
+}
+
+- (void)disconnectAfterReadingAndWriting {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    _theFlags |= (kForbidReadsWrites | kDisconnectAfterReads | kDisconnectAfterWrites);
+    
+    [self maybeScheduleDisconnect];
+}
+
+/*
+*schedules a call to disconnect if possible.
+*That is, if all writes have completed, and we're set to disconnect after writing, or if all reads have completed, and we're set to disconnect after reading.
+ */
+- (void)maybeScheduleDisconnect {
+    BOOL shouldDisconnect = NO;
+    
+    if(_theFlags & kDisconnectAfterReads) {
+        if((_theReadQueue.count == 0) && (_theCurrentRead == nil)) {
+            if(_theFlags & kDisconnectAfterWrites) {
+                if((_theWriteQueue.count == 0) && (_theCurrentWrite == nil)) {
+                    shouldDisconnect = YES;
+                }
+            }
+            else shouldDisconnect = YES;
+        }
+    }
+    else if(_theFlags & kDisconnectAfterWrites) {
+        if((_theWriteQueue.count == 0) && (_theCurrentWrite == nil)) {
+            shouldDisconnect = YES;
+        }
+    }
+    
+    if(shouldDisconnect) {
+        [self performSelector:@selector(disconnect) withObject:nil afterDelay:0 inModes:_theRunLoopModes];
+    }
+}
+
+/**
+    In the event of an error , this method may be called during 
+    onSocket:willDisconnectWithError:to read any data that's
+    left on the socket
+ */
+- (NSData *)unreadData {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    //Ensure this method will only return data in the event of an error.
+    if(!(_theFlags & kClosingWithError)) return nil;
+    
+    if(_theReadStream == NULL) return nil;
+    
+    NSUInteger totalBytesRead = (NSUInteger)[_partialReadBuffer length];
+    
+    BOOL error = NO;
+    while (!error && CFReadStreamHasBytesAvailable(_theReadStream)) {
+        if(totalBytesRead == _partialReadBuffer.length) {
+            [_partialReadBuffer increaseLengthBy:READALL_CHUNKSIZE];
+        }
+        
+        // number of bytes to read is space left in packet buffer.
+        NSUInteger bytesToRead = _partialReadBuffer.length - totalBytesRead;
+        
+        // read data into packet buffer.
+        UInt8 *packetbuf = (UInt8 *)([_partialReadBuffer mutableBytes] + totalBytesRead);
+        CFIndex result = CFReadStreamRead(_theReadStream, packetbuf, bytesToRead);
+        
+        //check results
+        if(result < 0) error = YES;
+        else {
+            totalBytesRead += result;
+        }
+    }
+    
+    [_partialReadBuffer setLength:totalBytesRead];
+    
+    return _partialReadBuffer;
 }
 
 #pragma mark Reading
@@ -1973,9 +2138,14 @@ Failed:
     [self checkForThreadSafety];
 #endif
     
+    if(_theSocket4) {
+//        return [self connectedPort]
+    }
     
     return 0;
 }
+
+
 
 - (NSString *)connectedHostFromNativeSocket4:(CFSocketNativeHandle)theNativeSocket {
     struct sockaddr_in sockaddr4;
@@ -2025,6 +2195,69 @@ Failed:
     }
     
     return peerstr;
+}
+
+- (UInt16)connectedPortFromNativeSocket4:(CFSocketNativeHandle)theNativeSocket {
+    struct sockaddr_in sockaddr4;
+    socklen_t sockaddr4len = sizeof(sockaddr4);
+    
+    if(getpeername(theNativeSocket, (struct sockaddr *)&sockaddr4, &sockaddr4len) < 0) return 0;
+    
+    return [self portFromAddress4:&sockaddr4];
+}
+
+- (UInt16)connectedPortFromNativeSocket6:(CFSocketNativeHandle)theNativeSocket {
+    struct sockaddr_in6 sockaddr6;
+    socklen_t sockaddr6len = sizeof(sockaddr6);
+    
+    if(getpeername(theNativeSocket, (struct sockaddr *)&sockaddr6, &sockaddr6len) < 0) return 0;
+    
+    return [self portFromAddress6:&sockaddr6];
+}
+
+- (UInt16)connectedPortFromCFSocket4:(CFSocketRef)theSocket {
+    CFDataRef peeraddr;
+    UInt16 peerport = 0;
+    
+    if((peeraddr = CFSocketCopyPeerAddress(theSocket))) {
+        struct sockaddr_in *pSockAddr = (struct sockaddr_in *)CFDataGetBytePtr(peeraddr);
+        
+        peerport = [self portFromAddress4:pSockAddr];
+        CFRelease(peeraddr);
+    }
+    
+    return peerport;
+}
+
+- (UInt16)connectedPortFromCFSocket6:(CFSocketRef)theSocket {
+    CFDataRef peeraddr;
+    UInt16 peerport = 0;
+    
+    if((peeraddr = CFSocketCopyPeerAddress(theSocket))) {
+        struct sockaddr_in6 *pSockAddr = (struct sockaddr_in6 *)CFDataGetBytePtr(peeraddr);
+        peerport = [self portFromAddress6:pSockAddr];
+        CFRelease(peeraddr);
+    }
+    
+    return peerport;
+}
+
+- (NSString *)localHostFromNativeSocket4:(CFSocketNativeHandle)theNativeSocket {
+    struct sockaddr_in sockaddr4;
+    socklen_t sockaddr4len = sizeof(sockaddr4);
+    
+    if(getsockname(theNativeSocket, (struct sockaddr *)&sockaddr4, &sockaddr4len) < 0) return nil;
+    
+    return [self hostFromAddress4:&sockaddr4];
+}
+
+- (NSString *)localHostFromNativeSocket6:(CFSocketNativeHandle)theNativeSocket {
+    struct sockaddr_in6 sockaddr6;
+    socklen_t sockaddr6len = sizeof(sockaddr6);
+    
+    if(getsockname(theNativeSocket, (struct sockaddr *)&sockaddr6, &sockaddr6len) < 0) return nil;
+    
+    return [self hostFromAddress6:&sockaddr6];
 }
 
 - (UInt16)localPortFromCFSocket4:(CFSocketRef)theSocket {
