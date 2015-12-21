@@ -2089,6 +2089,127 @@ Failed:
     return [NSError errorWithDomain:domain code:err.error userInfo:info];
 }
 
+#pragma mark CF Callbacks
+- (void)doCFSocketCallback:(CFSocketCallBackType)type forSocket:(CFSocketRef)sock withAddress:(NSData *)address withData:(const void *)pData {
+#pragma mark unused(address)
+    NSParameterAssert((sock == _theSocket4) || (sock == _theSocket6));
+    
+    switch (type) {
+        case kCFSocketConnectCallBack:
+            // The data argument is either NULL or a pointer to an SInt32 error code , if the connect failed.
+            if(pData) {
+                [self doSocketOpen:sock withCFSocketError:kCFSocketError];
+            }
+            else {
+                [self doSocketOpen:sock withCFSocketError:kCFSocketSuccess];
+            }
+            break;
+        case kCFSocketAcceptCallBack:
+            [self doAcceptFromSocket:sock withNewNativeSocket:*((CFSocketNativeHandle *)pData)];
+            break;
+        default:
+            NSLog(@"AsyncSocket %p received unexpected CFSocketCallbackType %i", self, (int)type);
+            break;
+    }
+}
+
+- (void)doCFReadStreamCallback:(CFStreamEventType)type forStream:(__unused CFReadStreamRef)stream {
+#pragma unused(stream)
+    NSParameterAssert(NULL != _theReadStream);
+    
+    CFStreamError err;
+    switch (type) {
+        case kCFStreamEventOpenCompleted:
+            _theFlags |= kDidCompleteOpenForRead;
+            [self doStreamOpen];
+            break;
+        case kCFStreamEventHasBytesAvailable:
+            if(_theFlags & kStartingReadTLS) {
+                [self onTLSHandshakeSuccessful];
+            }
+            else {
+                _theFlags |= kSocketHasBytesAvailable;
+                [self doBytesAvailable];
+            }
+            break;
+        case kCFStreamEventErrorOccurred:
+        case kCFStreamEventEndEncountered:
+            err = CFReadStreamGetError(_theReadStream);
+            [self closeWithError:[self errorFromCFStreamError:err]];
+            break;
+
+        default:
+            NSLog(@"AsyncSocket %p received unexpected CFReadStream callback, CFStreamEventType %i", self, (int)type);
+            break;
+    }
+}
+
+- (void)doCFWriteStreamCallback:(CFStreamEventType)type forStream:(__unused CFWriteStreamRef)stream {
+    NSParameterAssert(_theWriteStream != NULL);
+    
+    CFStreamError err;
+    switch (type) {
+        case kCFStreamEventOpenCompleted:
+            _theFlags |= kDidCompleteOpenForWrite;
+            [self doStreamOpen];
+            break;
+        case kCFStreamEventCanAcceptBytes:
+            if(_theFlags & kStartingWriteTLS) {
+                [self onTLSHandshakeSuccessful];
+            }
+            else {
+                _theFlags |= kSocketCanAcceptBytes;
+                [self doSendBytes];
+            }
+            break;
+        case kCFStreamEventErrorOccurred:
+        case kCFStreamEventEndEncountered:
+            err = CFWriteStreamGetError(_theWriteStream);
+            [self closeWithError:[self errorFromCFStreamError:err]];
+            break;
+            
+        default:
+            NSLog(@"AsyncSocket %p received unexpected CFWriteStream callback, CFStreamEventType %i", self, (int)type);
+            break;
+    }
+}
+
+/**
+    This is the callback we setup for CFSocket, this method does nothing but forward the call to it's Objective-C counterpart
+ */
+
+static void MyCFSocketCallback(CFSocketRef sref, CFSocketCallBackType type, CFDataRef inAddress, const void *pData, void *pInfo) {
+    @autoreleasepool {
+        AsyncSocket *theSocket = (__bridge AsyncSocket *)pInfo;
+        NSData *address = [(__bridge NSData *)inAddress copy];
+        
+        [theSocket doCFSocketCallback:type forSocket:sref withAddress:address withData:pData];
+    }
+}
+
+/*
+    this is the callback we setup for CFReadStream.
+    this method does nothing but forward the call to it's Objective-C counterpart
+*/
+
+static void MyCFReadStreamCallback(CFReadStreamRef stream, CFStreamEventType type, void *pInfo) {
+    @autoreleasepool {
+        AsyncSocket *theSocket = (__bridge AsyncSocket *)pInfo;
+        [theSocket doCFReadStreamCallback:type forStream:stream];
+    }
+}
+
+/*
+    this is the call back we setup for CFWriteStream.
+ */
+static void MyCFWriteStreamCallback(CFWriteStreamRef stream, CFStreamEventType type, void *pInfo) {
+    @autoreleasepool {
+        AsyncSocket *theSocket = (__bridge AsyncSocket *)pInfo;
+        
+        [theSocket doCFWriteStreamCallback:type forStream:stream];
+    }
+}
+
 #pragma mark Diagnostics
 - (BOOL)isDisconnected {
 #if DEBUG_THREAD_SAFETY
@@ -2139,13 +2260,124 @@ Failed:
 #endif
     
     if(_theSocket4) {
-//        return [self connectedPort]
+        return [self connectedPortFromCFSocket4:_theSocket4];
     }
+    if(_theSocket6)
+        return [self connectedPortFromCFSocket6:_theSocket6];
+    
+    
+    if(_theNativeSocket4 > 0) {
+        return [self connectedPortFromNativeSocket4:_theNativeSocket4];
+    }
+    
+    if(_theNativeSocket6 > 0) {
+        return [self connectedPortFromNativeSocket6:_theNativeSocket6];
+    }
+    return 0;
+}
+
+- (NSString *)localHost {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    if(_theSocket4) {
+        return [self localHostFromCFSocket4:_theSocket4];
+    }
+    if(_theSocket6) return [self localHostFromCFSocket6:_theSocket6];
+    
+    if(_theNativeSocket4 > 0) return [self localHostFromNativeSocket4:_theNativeSocket4];
+    
+    if(_theNativeSocket6 > 0) return [self localHostFromNativeSocket6:_theNativeSocket6];
+    
+    return nil;
+}
+
+- (UInt16)localPort {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    if(_theSocket4) return [self localPortFromCFSocket4:_theSocket4];
+    if(_theSocket6) return [self localPortFromCFSocket6:_theSocket6];
+    
+    if(_theNativeSocket4 > 0) return [self localPortFromNativeSocket4:_theNativeSocket4];
+    if(_theNativeSocket6 > 0) return [self localPortFromNativeSocket6:_theNativeSocket6];
     
     return 0;
 }
 
+- (NSString *)connectedHost4 {
+    if(_theSocket4) {
+        return [self connectedHostFromCFSocket4:_theSocket4];
+    }
+    if(_theNativeSocket4 > 0) return [self connectedHostFromNativeSocket4:_theNativeSocket4];
+    
+    return nil;
+}
 
+- (NSString *)connectedHost6 {
+    if(_theSocket6) return [self connectedHostFromCFSocket6:_theSocket6];
+    if(_theNativeSocket6 > 0) return [self connectedHostFromNativeSocket6:_theNativeSocket6];
+    
+    return nil;
+}
+
+- (UInt16)connectedPort4 {
+    if(_theSocket4) return [self connectedPortFromCFSocket4:_theSocket4];
+    if(_theNativeSocket4 > 0)
+        return [self connectedPortFromNativeSocket4:_theNativeSocket4];
+    
+    return 0;
+}
+
+- (UInt16)connectedPort6 {
+
+    if(_theSocket6)
+        return [self connectedPortFromCFSocket6:_theSocket6];
+    if(_theNativeSocket6 > 0 )
+        return [self connectedPortFromNativeSocket6:_theNativeSocket6];
+    
+    return 0;
+}
+
+- (NSString *)localHost4 {
+    if(_theSocket4) {
+        return [self localHostFromCFSocket4:_theSocket4];
+    }
+    
+    if(_theNativeSocket4 > 0)
+        return [self localHostFromNativeSocket4:_theNativeSocket4];
+    
+    return nil;
+}
+
+- (NSString *)localHost6 {
+    if(_theSocket6)
+        return [self localHostFromCFSocket6:_theSocket6];
+    if(_theNativeSocket6 > 0)
+        return [self localHostFromNativeSocket6:_theNativeSocket6];
+    
+    return nil;
+}
+
+- (UInt16)localPort4 {
+    if(_theSocket4)
+        return [self localPortFromCFSocket4:_theSocket4];
+    if(_theNativeSocket4 > 0)
+        return [self localPortFromNativeSocket4:_theNativeSocket4];
+    
+    return 0;
+}
+
+- (UInt16)localPort6 {
+    if(_theSocket6)
+        return [self localPortFromCFSocket6:_theSocket6];
+    if(_theNativeSocket6 > 0)
+        return [self localPortFromNativeSocket6:_theNativeSocket6];
+    
+    return 0;
+}
 
 - (NSString *)connectedHostFromNativeSocket4:(CFSocketNativeHandle)theNativeSocket {
     struct sockaddr_in sockaddr4;
@@ -2260,6 +2492,58 @@ Failed:
     return [self hostFromAddress6:&sockaddr6];
 }
 
+- (NSString *)localHostFromCFSocket4:(CFSocketRef)theSocket {
+    CFDataRef selfaddr;
+    NSString *selfstr = nil;
+    
+    if((selfaddr = CFSocketCopyAddress(theSocket))) {
+        struct sockaddr_in *pSockAddr = (struct sockaddr_in *)CFDataGetBytePtr(selfaddr);
+        
+        selfstr = [self hostFromAddress4:pSockAddr];
+        
+        CFRelease(selfaddr);
+    }
+    
+    return selfstr;
+}
+
+- (NSString *)localHostFromCFSocket6:(CFSocketRef)theSocket {
+    CFDataRef selfaddr;
+    NSString *selfstr = nil;
+    
+    if((selfaddr = CFSocketCopyAddress(theSocket))) {
+        struct sockaddr_in6 *pSockAddr = (struct sockaddr_in6 *)CFDataGetBytePtr(selfaddr);
+        
+        selfstr = [self hostFromAddress6:pSockAddr];
+        
+        CFRelease(selfaddr);
+    }
+    
+    return selfstr;
+}
+
+- (UInt16)localPortFromNativeSocket4:(CFSocketNativeHandle)theNativeSocket {
+    struct sockaddr_in sockaddr4;
+    socklen_t sockaddr4len = sizeof(sockaddr4);
+    
+    if(getsockname(theNativeSocket, (struct sockaddr *)&sockaddr4, &sockaddr4len) < 0) {
+        return 0;
+    }
+    
+    return [self portFromAddress4:&sockaddr4];
+}
+
+- (UInt16)localPortFromNativeSocket6:(CFSocketNativeHandle)theNativeSocket {
+    struct sockaddr_in6 sockaddr6;
+    socklen_t sockaddr6len = sizeof(sockaddr6);
+    
+    if(getsockname(theNativeSocket, (struct sockaddr *)&sockaddr6, &sockaddr6len) < 0) {
+        return 0;
+    }
+    
+    return [self portFromAddress6:&sockaddr6];
+}
+
 - (UInt16)localPortFromCFSocket4:(CFSocketRef)theSocket {
     CFDataRef selfaddr;
     UInt16 selfport = 0;
@@ -2267,6 +2551,20 @@ Failed:
     if((selfaddr = CFSocketCopyAddress(theSocket))) {
         struct sockaddr_in *pSockAddr = (struct sockaddr_in *)CFDataGetBytePtr(selfaddr);
         selfport = [self portFromAddress4:pSockAddr];
+        CFRelease(selfaddr);
+    }
+    
+    return selfport;
+}
+
+- (UInt16)localPortFromCFSocket6:(CFSocketRef)theSocket {
+    CFDataRef selfaddr;
+    UInt16 selfport = 0;
+    
+    if((selfaddr = CFSocketCopyAddress(theSocket))) {
+        struct sockaddr_in6 *pSockAddr = (struct sockaddr_in6 *)CFDataGetBytePtr(selfaddr);
+        
+        selfport = [self portFromAddress6:pSockAddr];
         CFRelease(selfaddr);
     }
     
@@ -2301,6 +2599,121 @@ Failed:
     return ntohs(pSockaddr6->sin6_port);
 }
 
+- (NSData *)connectedAddress {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    // extract address from CFSocket
+    CFSocketRef theSocket;
+    
+    if(_theSocket4) {
+        theSocket = _theSocket4;
+    }
+    else {
+        theSocket = _theSocket6;
+    }
+    
+    if(theSocket) {
+        CFDataRef peeraddr = CFSocketCopyPeerAddress(theSocket);
+        
+        if(peeraddr == NULL) return nil;
+        
+        NSData *result = (__bridge_transfer NSData *)peeraddr;
+        return result;
+    }
+    
+    // extract address from CFSocketNativeHandle
+    
+    socklen_t sockaddrlen;
+    CFSocketNativeHandle theNativeSocket = 0;
+    
+    if(_theNativeSocket4 > 0) {
+        theNativeSocket = _theNativeSocket4;
+        sockaddrlen = sizeof(struct sockaddr_in);
+    }
+    else {
+        theNativeSocket = _theNativeSocket6;
+        sockaddrlen = sizeof(struct sockaddr_in6);
+    }
+    
+    NSData *result = nil;
+    void *sockaddr = malloc(sockaddrlen);
+    
+    if(getsockname(theNativeSocket, (struct sockaddr *)sockaddr, &sockaddrlen) >= 0) {
+        result = [NSData dataWithBytesNoCopy:sockaddr length:sockaddrlen freeWhenDone:YES];
+    }
+    else {
+        free(sockaddr);
+    }
+    
+    return result;
+}
+
+- (NSData *)localAddress {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    // extract address from CFSocket
+    CFSocketRef theSocket;
+    
+    if(_theSocket4) {
+        theSocket = _theSocket4;
+    }
+    else theSocket = _theSocket6;
+    
+    if(theSocket) {
+        CFDataRef selfaddr = CFSocketCopyAddress(theSocket);
+        
+        if(selfaddr == NULL) return nil;
+        
+        NSData *result = (__bridge_transfer NSData *)selfaddr;
+
+        return result;
+    }
+    
+    // extract address from CFSocketNativeHandle
+    
+    socklen_t sockaddrlen;
+    CFSocketNativeHandle theNativeSocket = 0;
+    
+    if(_theNativeSocket4 > 0) {
+        theNativeSocket = _theNativeSocket4;
+        sockaddrlen = sizeof(struct sockaddr_in);
+    }
+    else {
+        theNativeSocket = _theNativeSocket6;
+        sockaddrlen = sizeof(struct sockaddr_in6);
+    }
+    
+    NSData *result = nil;
+    void *sockaddr = malloc(sockaddrlen);
+    
+    if(getsockname(theNativeSocket, (struct sockaddr *)sockaddr, &sockaddrlen) >= 0) {
+        result = [NSData dataWithBytesNoCopy:sockaddr length:sockaddrlen freeWhenDone:YES];
+    }
+    else free(sockaddr);
+    
+    return result;
+}
+
+- (BOOL)isIPv4 {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    return (_theNativeSocket4 > 0 || _theSocket4 != NULL);
+}
+
+- (BOOL)isIPv6 {
+#if DEBUG_THREAD_SAFETY
+    [self checkForThreadSafety];
+#endif
+    
+    return _theNativeSocket6 > 0 || _theSocket6 != NULL;
+}
+
 - (BOOL)areStreamsConnected {
     CFStreamStatus s;
     
@@ -2326,6 +2739,119 @@ Failed:
     [self checkForThreadSafety];
 #endif
     
+    static const char *statstr[] = {"not open","opening","open","reading","writing","at end","closed","has error"};
+    CFStreamStatus rs = (_theReadStream != NULL) ? CFReadStreamGetStatus(_theReadStream) : 0;
+    CFStreamStatus ws = (_theWriteStream != NULL) ? CFWriteStreamGetStatus(_theWriteStream) : 0;
+    
+    NSString *peerstr, *selfstr;
+    
+    BOOL is4 = [self isIPv4];
+    BOOL is6 = [self isIPv6];
+    
+    if (is4 || is6)
+    {
+        if (is4 && is6)
+        {
+            peerstr = [NSString stringWithFormat: @"%@/%@ %u",
+                       [self connectedHost4],
+                       [self connectedHost6],
+                       [self connectedPort]];
+        }
+        else if (is4)
+        {
+            peerstr = [NSString stringWithFormat: @"%@ %u",
+                       [self connectedHost4],
+                       [self connectedPort4]];
+        }
+        else
+        {
+            peerstr = [NSString stringWithFormat: @"%@ %u",
+                       [self connectedHost6],
+                       [self connectedPort6]];
+        }
+    }
+    else peerstr = @"nowhere";
+    
+    if (is4 || is6)
+    {
+        if (is4 && is6)
+        {
+            selfstr = [NSString stringWithFormat: @"%@/%@ %u",
+                       [self localHost4],
+                       [self localHost6],
+                       [self localPort]];
+        }
+        else if (is4)
+        {
+            selfstr = [NSString stringWithFormat: @"%@ %u",
+                       [self localHost4],
+                       [self localPort4]];
+        }
+        else
+        {
+            selfstr = [NSString stringWithFormat: @"%@ %u",
+                       [self localHost6],
+                       [self localPort6]];
+        }
+    }
+    else selfstr = @"nowhere";
+    
+    NSMutableString *ms = [[NSMutableString alloc] initWithCapacity:150];
+    
+    [ms appendString:[NSString stringWithFormat:@"<AsyncSocket %p", self]];
+    [ms appendString:[NSString stringWithFormat:@" local %@ remote %@ ", selfstr, peerstr]];
+    
+    unsigned readQueueCount  = (unsigned)[_theReadQueue count];
+    unsigned writeQueueCount = (unsigned)[_theWriteQueue count];
+    
+    [ms appendString:[NSString stringWithFormat:@"has queued %u reads %u writes, ", readQueueCount, writeQueueCount]];
+    
+    if (_theCurrentRead == nil || [_theCurrentRead isKindOfClass:[AsyncSpecialPacket class]])
+        [ms appendString: @"no current read, "];
+    else
+    {
+        int percentDone;
+        if (_theCurrentRead->_readLength > 0)
+            percentDone = (float)_theCurrentRead->_bytesDone / (float)_theCurrentRead->_readLength * 100.0F;
+        else
+            percentDone = 100.0F;
+        
+        [ms appendString: [NSString stringWithFormat:@"currently read %u bytes (%d%% done), ",
+                           (unsigned int)[_theCurrentRead->_buffer length],
+                           _theCurrentRead->_bytesDone ? percentDone : 0]];
+    }
+    
+    if (_theCurrentWrite == nil || [_theCurrentWrite isKindOfClass:[AsyncSpecialPacket class]])
+        [ms appendString: @"no current write, "];
+    else
+    {
+        int percentDone = (float)_theCurrentWrite->_bytesDone / (float)[_theCurrentWrite->_buffer length] * 100.0F;
+        
+        [ms appendString: [NSString stringWithFormat:@"currently written %u (%d%%), ",
+                           (unsigned int)[_theCurrentWrite->_buffer length],
+                           _theCurrentWrite->_bytesDone ? percentDone : 0]];
+    }
+    
+    [ms appendString:[NSString stringWithFormat:@"read stream %p %s, ", _theReadStream, statstr[rs]]];
+    [ms appendString:[NSString stringWithFormat:@"write stream %p %s", _theWriteStream, statstr[ws]]];
+    
+    if(_theFlags & kDisconnectAfterReads)
+    {
+        if(_theFlags & kDisconnectAfterWrites)
+            [ms appendString: @", will disconnect after reads & writes"];
+        else
+            [ms appendString: @", will disconnect after reads"];
+    }
+    else if(_theFlags & kDisconnectAfterWrites)
+    {
+        [ms appendString: @", will disconnect after writes"];
+    }
+    
+    if (![self isConnected]) [ms appendString: @", not connected"];
+    
+    [ms appendString:@">"];
+    
+    return ms;
 }
 
 #pragma mark Accessors
@@ -2395,5 +2921,24 @@ Failed:
 #endif
     
     return _theWriteStream;
+}
+@end
+
+#pragma mark Class Methods
+@implementation AsyncSocket (ClassMethods)
++ (NSData *)CRLFData {
+    return [NSData dataWithBytes:"\x0d\x0a" length:2];
+}
+
++ (NSData *)CRData {
+    return [NSData dataWithBytes:"\x0d" length:1];
+}
+
++ (NSData *)LFData {
+    return [NSData dataWithBytes:"\x0a" length:1];
+}
+
++ (NSData *)ZeroData {
+    return [NSData dataWithBytes:"" length:1];
 }
 @end

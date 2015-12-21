@@ -63,3 +63,9 @@ typedef NS_ENUM(NSInteger, AsyncSocketError) {
 
 - (NSString *)description;
 @end
+
+@interface AsyncSocket (ClassMethods)
+// return line separators
++ (NSData *)CRLFData;
+
+@end
