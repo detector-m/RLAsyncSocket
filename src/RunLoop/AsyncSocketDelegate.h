@@ -11,7 +11,16 @@
 
 @protocol AsyncSocketDelegate <NSObject>
 @optional
+/*
+    In the event of an error, the socket is closed.
+    You may call "unreadData" during this call-back to get the
+        last bit of data off the socket.
+    When connecting, this delegate method may be called before
+        "onSocket:didAcceptNewSocket:" or 
+        "onSocket:didConnectToHost".
+ */
 - (void)onSocket:(AsyncSocket *)sock willDisconnectWithError:(NSError *)err;
+
 - (void)onSocketDidDisconnect:(AsyncSocket *)sock;
 
 - (void)onSocket:(AsyncSocket *)sock didAcceptNewSocket:(AsyncSocket *)newSocket;

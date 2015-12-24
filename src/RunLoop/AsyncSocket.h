@@ -62,6 +62,26 @@ typedef NS_ENUM(NSInteger, AsyncSocketError) {
 - (instancetype)initWithDelegate:(id<AsyncSocketDelegate>)delegate userData:(long)userData;
 
 - (NSString *)description;
+
+/*
+    Use "canSafelySetDelegate" to see if there is any pending
+        business (reads and writes) with the current delegate
+        before changing it. It is, of course, safe to change the delegate before connecting or accepting connections.
+ */
+- (id <AsyncSocketDelegate>)delegate;
+- (BOOL)canSafelySetDelegate;
+- (void)setDelegate:(id<AsyncSocketDelegate>)delegate;
+
+/* User data can be a long, or an id or void * cast to a long.*/
+- (long)userData;
+- (void)setUserData:(long)userData;
+
+// Don't use these to read or write. And don't close them either
+- (CFSocketRef)getCFSocket;
+- (CFReadStreamRef)getCFReadStream;
+- (CFWriteStreamRef)getCFWriteStream;
+
+
 @end
 
 @interface AsyncSocket (ClassMethods)
