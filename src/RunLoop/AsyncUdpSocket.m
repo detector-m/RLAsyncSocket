@@ -187,21 +187,6 @@ enum AsyncUdpSocketFlags {
     }
 }
 
-#pragma mark Disconnect
-- (void)maybeScheduleClose {
-
-}
-
-#pragma mark Sending
-- (void)maybeDequeueSend {
-    
-}
-
-#pragma mark Receiving
-- (void)maybeDequeueReceive {
-
-}
-
 #pragma mark CF Callback
 /*
     This is the callback we setup for CFSocket.
@@ -647,6 +632,159 @@ Attempts to convert the given host/port into and IPv4 and/or IPv6 data structure
     return NO;
 }
 
+/*
+    Join multicast group
+    Group should be a multicast IP address
+    (eg.@"239.255.250.250" for IPv4).
+    
+    Address is local interface for IPv4, but currently defaults under IPv6.
+ */
+- (BOOL)joinMulticastGroup:(NSString *)group error:(NSError **)errPtr {
+    return [self joinMulticastGroup:group withAddress:nil error:errPtr];
+}
+
+- (BOOL)joinMulticastGroup:(NSString *)group withAddress:(NSString *)address error:(NSError **)errPtr {
+    if(_theFlages & kDidClose) {
+        [NSException raise:AsyncUdpSocketException format:@"The socket is closed"];
+    }
+    if(!(_theFlages & kDidBind)) {
+        [NSException raise:AsyncUdpSocketException format:@"Must bing a socket before joining a multicast group."];
+    }
+    if(_theFlages & kDidConnect) {
+        [NSException raise:AsyncUdpSocketException format:@"Cannot join a multicast group if connected."];
+    }
+    
+    // get local interface address
+    // convert the given host/port into native address structures for CFSocketSetAddress
+    NSData *address4 = nil, *address6 = nil;
+    
+    int error = [self convertForBindHost:address port:0 intoAddress4:&address4 address6:&address6];
+    if(error) {
+        if(errPtr) {
+            NSString *errMsg = [NSString stringWithCString:gai_strerror(error) encoding:NSASCIIStringEncoding];
+            NSString *errDsc = [NSString stringWithFormat:@"Invalid parameter 'address' : %@", errMsg];
+            NSDictionary *info = [NSDictionary dictionaryWithObject:errDsc forKey:NSLocalizedDescriptionKey];
+            
+            *errPtr = [NSError errorWithDomain:@"kCFStreamErrorDomainNetDB" code:error userInfo:info];
+        }
+        return NO;
+    }
+    
+    NSAssert((address4 || address6), @"address4 and address6 are nil");
+    
+    // Get multicast address (group)
+    NSData *group4 = nil, *group6 = nil;
+    
+    error = [self convertForSendHost:group port:0 intoAddress4:&group4 address6:&group6];
+    if(error) {
+        if(errPtr) {
+            NSString *errMsg = [NSString stringWithCString:gai_strerror(error) encoding:NSASCIIStringEncoding];
+            NSString *errDsc = [NSString stringWithFormat:@"Invalid parameter 'group':%@", errMsg];
+            NSDictionary *info = [NSDictionary dictionaryWithObject:errDsc forKey:NSLocalizedDescriptionKey];
+            
+            *errPtr = [NSError errorWithDomain:@"kCFStreamErrorDomainNetDB" code:error userInfo:info];
+        }
+        
+        return NO;
+    }
+    
+    NSAssert((group4 || group6), @"group4 and group6 are nil");
+    
+    if(_theSocket4 && group4 && address4) {
+        const struct sockaddr_in * nativeAddress = [address4 bytes];
+        const struct sockaddr_in *nativeGroup = [group4 bytes];
+        
+        struct ip_mreq imreq;
+        imreq.imr_multiaddr = nativeGroup->sin_addr;
+        imreq.imr_interface = nativeAddress->sin_addr;
+        
+        // Join multicast group on default interface
+        error = setsockopt(CFSocketGetNative(_theSocket4), IPPROTO_IP, IP_ADD_MEMBERSHIP, (const void *)&imreq, sizeof(struct ip_mreq));
+        if(error) {
+            if(errPtr) {
+                NSString *errMsg = @"Unable to join IPv4 multicast group";
+                NSDictionary *info = [NSDictionary dictionaryWithObject:errMsg forKey:NSLocalizedDescriptionKey];
+                
+                *errPtr = [NSError errorWithDomain:@"kCFStreamErrorDomainPOSIX" code:error userInfo:info];
+            }
+            
+            return NO;
+        }
+        
+        // Using IPv4 only
+        [self closeSocket6];
+        
+        return YES;
+    }
+    
+    if(_theSocket6 && group6 && address6) {
+        const struct sockaddr_in6 *nativeGroup = [group6 bytes];
+        
+        struct ipv6_mreq imreq;
+        imreq.ipv6mr_multiaddr = nativeGroup->sin6_addr;
+        imreq.ipv6mr_interface = 0;
+        
+        // join multicast group on default interface
+        error = setsockopt(CFSocketGetNative(_theSocket6), IPPROTO_IP, IPV6_JOIN_GROUP, (const void *)&imreq, sizeof(struct ipv6_mreq));
+        
+        if(error) {
+            if(errPtr) {
+                NSString *errMsg = @"Unable to join IPv6 multicast group";
+                NSDictionary *info = [NSDictionary dictionaryWithObject:errMsg forKey:NSLocalizedDescriptionKey];
+                
+                *errPtr = [NSError errorWithDomain:@"kCFStreamErrorDomainPOSIX" code:error userInfo:info];
+            }
+            return NO;
+        }
+        
+        //using IPv6 only
+        [self closeSocket4];
+        
+        return YES;
+    }
+    
+    // the given address and group didn't match the existing socket(s)
+    //This means there were no compatible combination of all IPv4 or IPv6 socket, group and address.
+    if(errPtr) {
+        NSString *errMsg = @"Invalid group and/or address, not matching existing socket(s)";
+        NSDictionary *info = [NSDictionary dictionaryWithObject:errMsg forKey:NSLocalizedDescriptionKey];
+        
+        *errPtr = [NSError errorWithDomain:AsyncUdpSocketErrorDomain code:AsyncUdpSocketBadParameter userInfo:info];
+    }
+    
+    return NO;
+}
+
+/*
+    By default, the underlying socket in the os will not allow you to send broadcast messages.
+    In order to send broadcast message, you need to enable this functionality in the socket.
+ 
+    A broadcast is a UDP message to address like 
+    "192.168.255.255" or  "255.255.255.255" 
+    that is delivered to every host on  the network.
+ 
+    The reason this is generally disabled by default is to prevent
+    accidental broadcast messages from flooding the net work.
+ */
+- (BOOL)enableBroadcast:(BOOL)flag error:(NSError **)errPtr {
+    if(_theSocket4) {
+        int value = flag ? 1 : 0;
+        int error = setsockopt(CFSocketGetNative(_theSocket4), SOL_SOCKET, SO_BROADCAST, (const void *)&value, sizeof(value));
+        if(errPtr)
+        {
+            NSString *errMsg = @"Unable to enable broadcast message sending";
+            NSDictionary *info = [NSDictionary dictionaryWithObject:errMsg forKey:NSLocalizedDescriptionKey];
+            
+            *errPtr = [NSError errorWithDomain:@"kCFStreamErrorDomainPOSIX" code:error userInfo:info];
+        }
+        return NO;
+    }
+    
+    
+    
+    return YES;
+}
+
 #pragma mark Disconnect Implementation
 - (void)emptyQueues {
 //    if(_theCurrentSend) [self ]
@@ -676,7 +814,77 @@ Attempts to convert the given host/port into and IPv4 and/or IPv6 data structure
     }
 }
 
+- (void)close {
+    [self emptyQueues];
+    [self closeSocket4];
+    [self closeSocket6];
+    
+    _theRunLoop = NULL;
+    
+    // Delay notification to given user freedom to release without returning here and core-dumping.
+    if([_theDelegate respondsToSelector:@selector(onUdpSocketDidClose:)]) {
+        [((id)_theDelegate) performSelector:@selector(onUdpSocketDidClose:) withObject:self afterDelay:0 inModes:_theRunLoopModes];
+    }
+    
+    _theFlages |= kDidClose;
+}
 
+- (void)closeAfterSending {
+    if(_theFlages & kDidClose) return;
+    
+    _theFlages |= (kForbidSendReceive | kCloseAfterSends);
+    [self maybeScheduleClose];
+}
+
+- (void)closeAfterReceiving {
+    if(_theFlages & kDidClose) return;
+    
+    _theFlages |= (kForbidSendReceive | kCloseAfterSends);
+    [self maybeScheduleClose];
+}
+
+- (void)closeAfterSendingAndReceiving {
+    if(_theFlages & kDidClose) return;
+    
+    _theFlages |= (kForbidSendReceive | kCloseAfterSends | kCloseAfterReceives);
+    [self maybeScheduleClose];
+}
+
+- (void)maybeScheduleClose {
+    BOOL shouldDisconnect = NO;
+    
+    if(_theFlages & kCloseAfterSends) {
+        if(_theSendQueue.count == 0 && _theCurrentSend == nil) {
+            if(_theFlages & kCloseAfterReceives) {
+                if(_theReceiveQueue.count == 0 && _theCurrentReceive == nil) {
+                    shouldDisconnect = YES;
+                }
+            }
+            else {
+                shouldDisconnect = YES;
+            }
+        }
+    }
+    else if(_theFlages & kCloseAfterReceives) {
+        if(_theReceiveQueue.count == 0 && _theCurrentReceive == nil) {
+            shouldDisconnect = YES;
+        }
+    }
+    
+    if(shouldDisconnect) {
+        [self performSelector:@selector(close) withObject:nil afterDelay:0 inModes:_theRunLoopModes];
+    }
+}
+
+#pragma mark Sending
+- (void)maybeDequeueSend {
+    
+}
+
+#pragma mark Receiving
+- (void)maybeDequeueReceive {
+    
+}
 
 #pragma mark Errors
 //Returns a standard error object for the current errno value.
@@ -804,6 +1012,214 @@ Attempts to convert the given host/port into and IPv4 and/or IPv6 data structure
 
 - (NSArray *)runLoopModes {
     return [_theRunLoopModes copy];
+}
+
+#pragma mark Diagnostics
+- (NSString *)localHost {
+    if(_cachedLocalHost) return _cachedLocalHost;
+    
+    if(_theSocket4) return [self localHost:_theSocket4];
+    else return [self localHost:_theSocket6];
+}
+
+- (UInt16)localPort {
+    if(_cachedLocalPort > 0) return _cachedLocalPort;
+    
+    if(_theSocket4) return [self localPort:_theSocket4];
+    else return [self localPort:_theSocket6];
+}
+
+- (NSString *)connectedHost {
+    if(_cachedConnectedHost) return _cachedConnectedHost;
+    
+    if(_theSocket4) return [self connectedHost:_theSocket4];
+    else return [self connectedHost:_theSocket6];
+}
+
+- (UInt16)connectedPort {
+    if(_cachedConnectedPort > 0) return _cachedConnectedPort;
+    
+    if(_theSocket4) return [self connectedPort:_theSocket4];
+    else return [self connectedPort:_theSocket6];
+}
+
+- (NSString *)localHost:(CFSocketRef)theSocket {
+    if(theSocket == NULL) return nil;
+    
+    // Unfortunately we can't use CFSocketCopyAddress.
+    // The CFSocket library caches the address the first time you call CFSocketCopyAddress.
+    // So if this is called prior to binding/connection/sending, it won't be updated again when necessary,
+    // and will continue to return the old value of the socket address.
+    NSString *result = nil;
+    
+    if(theSocket == _theSocket4) {
+        struct sockaddr_in sockaddr4;
+        socklen_t sockaddr4len = sizeof(sockaddr4);
+        
+        if(getsockname(CFSocketGetNative(theSocket), (struct sockaddr *)&sockaddr4, &sockaddr4len) < 0) {
+            return nil;
+        }
+        result = [self addressHost4:&sockaddr4];
+    }
+    else {
+        struct sockaddr_in6 sockaddr6;
+        socklen_t sockaddr6len = sizeof(sockaddr6);
+        
+        if(getsockname(CFSocketGetNative(_theSocket6), (struct sockaddr *)&sockaddr6, &sockaddr6len) < 0) {
+            return nil;
+        }
+        
+        result = [self addressHost6:&sockaddr6];
+    }
+    
+    if(_theFlages & kDidBind) {
+        _cachedLocalHost = [result copy];
+    }
+    
+    return result;
+}
+
+- (UInt16)localPort:(CFSocketRef)theSocket {
+    if(theSocket == NULL) return 0;
+    
+    UInt16 result = 0;
+    
+    if(theSocket == _theSocket4) {
+        struct sockaddr_in sockaddr4;
+        socklen_t sockaddr4len = sizeof(sockaddr4);
+        
+        if(getsockname(CFSocketGetNative(theSocket), (struct sockaddr *)&sockaddr4, &sockaddr4len) < 0) {
+            return 0;
+        }
+        
+        result = ntohs(sockaddr4.sin_port);
+    }
+    else {
+        struct sockaddr_in6 sockaddr6;
+        socklen_t sockaddr6len = sizeof(sockaddr6);
+        
+        if(getsockname(CFSocketGetNative(theSocket), (struct sockaddr *)&sockaddr6, &sockaddr6len) < 0) {
+            return 0;
+        }
+        result = ntohs(sockaddr6.sin6_port);
+    }
+    
+    if(_theFlages & kDidBind) _cachedLocalPort = result;
+    
+    return result;
+}
+
+- (NSString *)connectedHost:(CFSocketRef)theSocket {
+    if(!theSocket) return nil;
+    
+    NSString *result = nil;
+    
+    if(theSocket == _theSocket4) {
+        struct sockaddr_in sockaddr4;
+        socklen_t sockaddr4len = sizeof(sockaddr4);
+        
+        if(getpeername(CFSocketGetNative(theSocket), (struct sockaddr *)&sockaddr4, &sockaddr4len) < 0) {
+            return nil;
+        }
+        
+        result = [self addressHost4:&sockaddr4];
+    }
+    else {
+        struct sockaddr_in6 sockaddr6;
+        socklen_t sockaddr6len = sizeof(sockaddr6);
+        
+        if(getpeername(CFSocketGetNative(theSocket), (struct sockaddr *)&sockaddr6, &sockaddr6len) < 0) {
+            return nil;
+        }
+        
+        result = [self addressHost6:&sockaddr6];
+    }
+    
+    if(_theFlages & kDidConnect) {
+        _cachedConnectedHost = [result copy];
+    }
+    
+    return result;
+}
+
+- (UInt16)connectedPort:(CFSocketRef)theSocket {
+    if(!theSocket) return 0;
+    
+    UInt16 result = 0;
+    
+    if(theSocket == _theSocket4) {
+        struct sockaddr_in sockaddr4;
+        socklen_t sockadd4len = sizeof(sockaddr4);
+        
+        if(getpeername(CFSocketGetNative(theSocket), (struct sockaddr *)&sockaddr4, &sockadd4len) < 0) {
+            return 0;
+        }
+        
+        result = htons(sockaddr4.sin_port);
+    }
+    else {
+        struct sockaddr_in6 sockaddr6;
+        socklen_t sockaddr6len = sizeof(sockaddr6);
+        
+        if(getpeername(CFSocketGetNative(theSocket), (struct sockaddr *)&sockaddr6, &sockaddr6len) < 0) {
+            return 0;
+        }
+        
+        result = ntohs(sockaddr6.sin6_port);
+    }
+    
+    if(_theFlages & kDidConnect) {
+        _cachedConnectedPort = result;
+    }
+    
+    return result;
+}
+
+- (BOOL)isConnected {
+    return (((_theFlages&kDidConnect)!=0) && ((_theFlages & kDidClose)==0));
+}
+
+- (BOOL)isConnectedToHost:(NSString *)host port:(UInt16)port {
+    return [[self connectedHost] isEqualToString:host] && [self connectedPort] == port;
+}
+
+- (BOOL)isClosed {
+    return (_theFlages & kDidClose) ? YES : NO;
+}
+
+- (BOOL)isIPv4 {
+    return _theSocket4 != NULL;
+}
+
+- (BOOL)isIPv6 {
+    return _theSocket6 != NULL;
+}
+
+- (unsigned int)maximumTransmissionUnit {
+    CFSocketNativeHandle theNativeSocket;
+    if(_theSocket4) {
+        theNativeSocket = CFSocketGetNative(_theSocket4);
+    }
+    else if(_theSocket6) {
+        theNativeSocket = CFSocketGetNative(_theSocket6);
+    }
+    else return 0;
+    
+    if(theNativeSocket == 0) {
+        return 0;
+    }
+    
+    struct ifreq ifr;
+    bzero(&ifr, sizeof(ifr));
+    
+    if(if_indextoname(theNativeSocket, ifr.ifr_name) == NULL)
+        return 0;
+    
+    if(ioctl(theNativeSocket, SIOCGIFMTU, &ifr) >= 0) {
+        return ifr.ifr_mtu;
+    }
+    
+    return 0;
 }
 
 #pragma mark Accessors
