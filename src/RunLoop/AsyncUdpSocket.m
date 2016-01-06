@@ -877,8 +877,188 @@ Attempts to convert the given host/port into and IPv4 and/or IPv6 data structure
 }
 
 #pragma mark Sending
-- (void)maybeDequeueSend {
+- (BOOL)sendData:(NSData *)data withTimeout:(NSTimeInterval)timeout tag:(long)tag {
+    if(data.length == 0) return NO;
+    if(_theFlages & kForbidSendReceive) return NO;
+    if(_theFlages & kDidClose) return NO;
     
+    // This method is only for connected sockets
+    if(![self isConnected]) return NO;
+    
+    AsyncSendPacket *packet = [[AsyncSendPacket alloc] initWithData:data address:nil timeout:timeout tag:tag];
+    
+    [_theSendQueue addObject:packet];
+    [self scheduleDequeueSend];
+    
+    return YES;
+}
+
+- (BOOL)canAcceptBytes:(CFSocketRef)theSocket {
+    if(theSocket == _theSocket4) {
+        if(_theFlages & kSock4CanAcceptBytes) return YES;
+    }
+    else {
+        if(_theFlages & kSock6CanAcceptBytes) return YES;
+    }
+    
+    CFSocketNativeHandle theNativeSocket = CFSocketGetNative(theSocket);
+    
+    if(theNativeSocket == 0) {
+        NSLog(@"Error - Could not get CFSocketNativeHandle from CFSocketRef");
+        return NO;
+    }
+    
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(theNativeSocket, &fds);
+    
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    
+    return select(FD_SETSIZE, NULL, &fds, NULL, &timeout) > 0;
+}
+
+- (CFSocketRef)socketForPacket:(AsyncSendPacket *)packet {
+    if(!_theSocket4) return _theSocket6;
+    if(!_theSocket6) return _theSocket4;
+    
+    return (([packet->_address length] == sizeof(struct sockaddr_in))? _theSocket4 : _theSocket6);
+}
+
+/*
+    Puts a maybeDequeueSend on the run loop.
+ */
+- (void)scheduleDequeueSend {
+    if((_theFlages & kDequeueReceiveScheduled) == 0) {
+        _theFlages |= kDequeueSendScheduled;
+        [self performSelector:@selector(maybeDequeueSend) withObject:nil afterDelay:0 inModes:_theRunLoopModes];
+    }
+}
+
+/*
+    This method starts a new send, if need.
+    It is called when a user requests a send.
+ */
+- (void)maybeDequeueSend {
+    // Unset the flag indicating a call to this method is scheduled
+    _theFlages &= ~kDequeueSendScheduled;
+    
+    if(_theCurrentSend == nil) {
+        if(_theSendQueue.count > 0) {
+            // Dequeue next send packet
+            _theCurrentSend = [_theSendQueue objectAtIndex:0];
+            [_theSendQueue removeObjectAtIndex:0];
+            
+            // Start time-out timer.
+            if(_theCurrentSend->_timeout >= 0.0) {
+                _theSendTimer = [NSTimer timerWithTimeInterval:_theCurrentSend->_timeout target:self selector:@selector(doSendTimeout:) userInfo:nil repeats:NO];
+                
+                [self runLoopAddTimer:_theSendTimer];
+            }
+            
+            // Immediately send, if possible
+            [self doSend:[self socketForPacket:_theCurrentSend]];
+        }
+        else if(_theFlages & kCloseAfterSends) {
+            if(_theFlages & kCloseAfterReceives) {
+                if(_theReceiveQueue.count == 0 && _theCurrentReceive == nil) {
+                    [self close];
+                }
+            }
+            else {
+                [self close];
+            }
+        }
+    }
+}
+
+/*
+    This method is called when a new read is taken from the read queue or when new data becomes available on the stream
+ */
+- (void)doSend:(CFSocketRef)theSocket {
+    if(_theCurrentSend != nil) {
+        if(theSocket != [self socketForPacket:_theCurrentSend]) {
+            return;
+        }
+        
+        if([self canAcceptBytes:theSocket]) {
+            size_t result;
+            CFSocketNativeHandle theNativeSocket = CFSocketGetNative(theSocket);
+            
+            const void *buf = [_theCurrentSend->_buffer bytes];
+            NSUInteger bufSize = [_theCurrentSend->_buffer length];
+            
+            if([self isConnected]) {
+                result = send(theNativeSocket, buf, (size_t)bufSize, 0);
+            }
+            else {
+                const void *dst = [_theCurrentSend->_address bytes];
+                NSUInteger dstSize = [_theCurrentSend->_address length];
+                
+                result = sendto(theNativeSocket, buf, (size_t)bufSize, 0, dst, (socklen_t)dstSize);
+            }
+            
+            if(theSocket == _theSocket4) {
+                _theFlages &= ~kSock4CanAcceptBytes;
+            }
+            else {
+                _theFlages &= ~kSock6CanAcceptBytes;
+            }
+            
+            if((long)result < 0)
+                [self failCurrentSend:[self getErrnoError]];
+            else {
+                // if it wasn't bound befor, it's bound now
+                _theFlages |= kDidBind;
+                
+                [self completeCurrentSend];
+            }
+            
+            [self scheduleDequeueSend];
+        }
+        else {
+            // Request notification when the socket is read to send more data
+            CFSocketEnableCallBacks(theSocket, kCFSocketReadCallBack | kCFSocketWriteCallBack);
+        }
+    }
+}
+
+- (void)completeCurrentSend {
+    NSAssert(_theCurrentSend, @"Tring to complete current send when there is no current send.");
+    
+    if([_theDelegate respondsToSelector:@selector(onUdpSocket:didSendDataWithTag:)]) {
+        [_theDelegate onUdpSocket:self didSendDataWithTag:_theCurrentSend->_tag];
+    }
+    
+    if(_theCurrentSend != nil) [self endCurrentSend]; // Caller may have disconnected
+}
+- (void)failCurrentSend:(NSError *)error {
+    NSAssert (_theCurrentSend, @"Trying to fail current send when there is no current send.");
+
+    if([_theDelegate respondsToSelector:@selector(onUdpSocket:didNotReceiveDataWithTag:dueToError:)]) {
+        [_theDelegate onUdpSocket:self didNotReceiveDataWithTag:_theCurrentSend->_tag dueToError:error];
+    }
+    
+    if(_theCurrentSend != nil) [self endCurrentSend];
+}
+
+/*
+    Ends the current sends, and all associated variables such as the send timer.
+ */
+- (void)endCurrentSend {
+    NSAssert(_theCurrentSend, @"tring to end current send when there is no current send.");
+    [_theSendTimer invalidate], _theSendTimer = nil;
+
+    _theCurrentSend = nil;
+}
+
+- (void)doSendTimeout:(NSTimer *)timer {
+    if(timer != _theSendTimer) return; // old timer Ignore it
+    if(_theCurrentSend != nil) {
+        [self failCurrentSend:[self getSendTimeoutError]];
+        [self scheduleDequeueSend];
+    }
 }
 
 #pragma mark Receiving
