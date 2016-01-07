@@ -25,7 +25,7 @@
 
 #import "AsyncUdpSocketDelegate.h"
 #import "AsyncSendPacket.h"
-#import "AsyncReceivePacekt.h"
+#import "AsyncReceivePacket.h"
 
 #define SENDQUEUE_CAPACITY 5
 #define RECEIVEQUEUE_CAPACITY 5
@@ -188,12 +188,42 @@ enum AsyncUdpSocketFlags {
 }
 
 #pragma mark CF Callback
+- (void)doCFSocketCallback:(CFSocketCallBackType)type forSocket:(CFSocketRef)sock withAddress:(NSData *)address withData:(const void *)pData {
+    NSParameterAssert((sock == _theSocket4) || (sock == _theSocket6));
+    
+    switch (type) {
+        case kCFSocketReadCallBack:
+            if(sock == _theSocket4) {
+                _theFlages |= kSock4HasBytesAvailable;
+            }
+            else {
+                _theFlages |= kSock6HasBytesAvailable;
+            }
+            
+            [self doReceive:sock];
+            break;
+        case kCFSocketWriteCallBack:
+            if(sock == _theSocket4)
+                _theFlages |= kSock4CanAcceptBytes;
+            else
+                _theFlages |= kSock6CanAcceptBytes;
+            [self doSend:sock];
+            break;
+            
+        default:
+            NSLog (@"AsyncUdpSocket %p received unexpected CFSocketCallBackType %lu.", self, (unsigned long) type);
+            break;
+    }
+}
 /*
     This is the callback we setup for CFSocket.
     This Method does nothing buf forward the call to it's Objective-C counterpart
  */
 static void MyCFSocketCallback(CFSocketRef sref, CFSocketCallBackType type, CFDataRef address, const void *pData, void *pInfo) {
-
+    @autoreleasepool {
+        AsyncUdpSocket *theSocket = (__bridge AsyncUdpSocket *)pInfo;
+        [theSocket doCFSocketCallback:type forSocket:sref withAddress:(__bridge NSData *)address withData:pData];
+    }
 }
 
 #pragma mark Utilities
@@ -893,6 +923,57 @@ Attempts to convert the given host/port into and IPv4 and/or IPv6 data structure
     return YES;
 }
 
+- (BOOL)sendData:(NSData *)data toHost:(NSString *)host port:(UInt16)port withTimeout:(NSTimeInterval)timeout tag:(long)tag {
+    if(data.length == 0) return NO;
+    if(_theFlages & kForbidSendReceive) return NO;
+    if(_theFlages & kDidClose) return NO;
+    
+    //This method is only for non-connected sockets
+    if([self isConnected]) return NO;
+    
+    NSData *address4 = nil, *address6 = nil;
+    
+    [self convertForSendHost:host port:port intoAddress4:&address4 address6:&address6];
+    
+    AsyncSendPacket *packet = nil;
+    
+    if(address4 && _theSocket4) {
+        packet = [[AsyncSendPacket alloc] initWithData:data address:address4 timeout:timeout tag:tag];
+    }
+    else if(address6 && _theSocket6) {
+        packet = [[AsyncSendPacket alloc] initWithData:data address:address6 timeout:timeout tag:tag];
+    }
+    else return NO;
+    
+    [_theSendQueue addObject:packet];
+    [self scheduleDequeueSend];
+    
+    return YES;
+}
+
+- (BOOL)sendData:(NSData *)data toAddress:(NSData *)remoteAddr withTimeout:(NSTimeInterval)timeout tag:(long)tag {
+    if(data.length == 0) return NO;
+    if(_theFlages & kForbidSendReceive) return NO;
+    if(_theFlages & kDidClose) return NO;
+    
+    // this method is only for non-connected sockets
+    if([self isConnected]) return NO;
+    
+    if(remoteAddr.length == sizeof(struct sockaddr_in) && !_theSocket4)
+        return NO;
+    
+    if(remoteAddr.length == sizeof(struct sockaddr_in6) && _theSocket6 == NULL) {
+        return NO;
+    }
+    
+    AsyncSendPacket *packet = [[AsyncSendPacket alloc] initWithData:data address:remoteAddr timeout:timeout tag:tag];
+    
+    [_theSendQueue addObject:packet];
+    [self scheduleDequeueSend];
+    
+    return YES;
+}
+
 - (BOOL)canAcceptBytes:(CFSocketRef)theSocket {
     if(theSocket == _theSocket4) {
         if(_theFlages & kSock4CanAcceptBytes) return YES;
@@ -1062,8 +1143,254 @@ Attempts to convert the given host/port into and IPv4 and/or IPv6 data structure
 }
 
 #pragma mark Receiving
-- (void)maybeDequeueReceive {
+- (void)receiveWithTimeout:(NSTimeInterval)timeout tag:(long)tag {
+    if(_theFlages & kForbidSendReceive) return;
+    if(_theFlages & kDidClose) return;
     
+    AsyncReceivePacket *packet = [[AsyncReceivePacket alloc] initWithTimeout:timeout tag:tag];
+    
+    [_theReceiveQueue addObject:packet];
+    [self scheduleDequeueReceive];
+}
+
+- (BOOL)hasBytesAvailable:(CFSocketRef)sockRef {
+    if(sockRef == _theSocket4) {
+        if(_theFlages & kSock4HasBytesAvailable) return YES;
+    }
+    else {
+        if(_theFlages & kSock6HasBytesAvailable) return YES;
+    }
+    
+    CFSocketNativeHandle theNativeSocket = CFSocketGetNative(sockRef);
+    
+    if(theNativeSocket == 0) {
+        NSLog(@"Error - counld not get CFSocketNativeHandle from CFSocketRef");
+    }
+    
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(theNativeSocket, &fds);
+    
+    struct timeval timeout;
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 0;
+    
+    return (select(FD_SETSIZE, &fds, NULL, NULL, &timeout) > 0);
+}
+
+//puts a maybeDequeueReceive on the run loop.
+- (void)scheduleDequeueReceive {
+    if((_theFlages & kDequeueReceiveScheduled) == 0) {
+        _theFlages |= kDequeueReceiveScheduled;
+        [self performSelector:@selector(maybeDequeueReceive) withObject:nil afterDelay:0 inModes:_theRunLoopModes];
+    }
+}
+
+/*
+    Starts a new receive operation if needed
+ */
+- (void)maybeDequeueReceive {
+    // Unset the flag indicating a call to this method is scheduled
+    _theFlages &= ~kDequeueReceiveScheduled;
+    
+    if(_theCurrentReceive == nil) {
+        if(_theReceiveQueue.count > 0) {
+            // Dequeue next receive packet
+            _theCurrentReceive = [_theReceiveQueue objectAtIndex:0];
+            [_theReceiveQueue removeObjectAtIndex:0];
+            
+            // Start time-out timer.
+            if(_theCurrentReceive->_timeout >= 0.0) {
+                _theReceiveTimer = [NSTimer timerWithTimeInterval:_theCurrentReceive->_timeout target:self selector:@selector(doReceiveTimeout:) userInfo:nil repeats:NO];
+                
+                [self runLoopAddTimer:_theReceiveTimer];
+            }
+            
+            // Immediately receive, if possible
+            // we always check both sockets so we do not ever starve one of them
+            //we also check them in alternating orders to prevent starvation if both of them
+            // hava a continuous flow of incoming data.
+            if(_theFlages & kFlipFlop) {
+                [self doReceive4];
+                [self doReceive6];
+            }
+            else {
+                [self doReceive6];
+                [self doReceive4];
+            }
+            
+            _theFlages ^= kFlipFlop;
+        }
+        else if(_theFlages & kCloseAfterReceives) {
+            if(_theFlages & kCloseAfterSends) {
+                if(_theSendQueue.count == 0 && _theCurrentSend == nil) {
+                    [self close];
+                }
+            }
+            else
+                [self close];
+        }
+    }
+}
+
+- (void)doReceive4 {
+    if(_theSocket4) [self doReceive:_theSocket4];
+}
+
+- (void)doReceive6 {
+    if(_theSocket6) {
+        [self doReceive:_theSocket6];
+    }
+}
+
+- (void)doReceive:(CFSocketRef)theSocket {
+    if(_theCurrentReceive != nil) {
+        BOOL appIgnoredReceiveData;
+        BOOL userIgnoredReceiveData;
+        
+        do {
+            // Set or reset ignored variables
+            // If the app or user ignores the received data, we'll continue this do-while loop.
+            appIgnoredReceiveData = NO;
+            userIgnoredReceiveData = NO;
+            
+            if([self hasBytesAvailable:theSocket]) {
+                NSData *bufferData = nil;
+                size_t result;
+                CFSocketNativeHandle theNativeSocket = CFSocketGetNative(theSocket);
+                
+                // allocate buffer for recvfrom operation
+                // if the operation is successful, we'll realloc the buffer to the appropriate size,
+                // and create an nsdata wrapper around it without needing to copy and bytes around.
+                void *buf = malloc(_maxReceiveBufferSize);
+                size_t bufSize = _maxReceiveBufferSize;
+                
+                if(theSocket == _theSocket4) {
+                    struct sockaddr_in sockaddr4;
+                    socklen_t sockaddr4len = sizeof(sockaddr4);
+                
+                    result = recvfrom(theNativeSocket, buf, bufSize, 0, (struct sockaddr *)&sockaddr4, &sockaddr4len);
+                    
+                    if((long)result >= 0) {
+                        NSString *host = [self addressHost4:&sockaddr4];
+                        UInt16 port = ntohs(sockaddr4.sin_port);
+                        
+                        if([self isConnected] && ![self isConnectedToHost:host port:port]) {
+                            // The user connected to an address, and the received data does not match the address.
+                            //this may happen if the data is received by the kernel prior to the connect call.
+                            appIgnoredReceiveData = YES;
+                        }
+                        else {
+                            if(result != bufSize) {
+                                buf = realloc(buf, result);
+                            }
+                            bufferData = [[NSData alloc] initWithBytesNoCopy:buf length:result freeWhenDone:YES];
+                            _theCurrentReceive->_buffer = bufferData;
+                            _theCurrentReceive->_host = host;
+                            _theCurrentReceive->_port = port;
+                        }
+                    }
+                    
+                    _theFlages &= ~kSock4HasBytesAvailable;
+                }
+                else {
+                    struct sockaddr_in6 sockaddr6;
+                    socklen_t sockaddr6len = sizeof(sockaddr6);
+                    
+                    result = recvfrom(theNativeSocket, buf, bufSize, 0, (struct sockaddr *)&sockaddr6, &sockaddr6len);
+                    if((long)result >= 0) {
+                        NSString *host = [self addressHost6:&sockaddr6];
+                        UInt16 port = ntohs(sockaddr6.sin6_port);
+                        
+                        if([self isConnected] && ![self isConnectedToHost:host port:port]) {
+                            appIgnoredReceiveData = YES;
+                        }
+                        else {
+                            if(result != bufSize) {
+                                buf = realloc(buf, result);
+                            }
+                            bufferData = [[NSData alloc] initWithBytesNoCopy:buf length:result freeWhenDone:YES];
+                            _theCurrentReceive->_buffer = bufferData;
+                            _theCurrentReceive->_host = host;
+                            _theCurrentReceive->_port = port;
+                        }
+                    }
+                    
+                    _theFlages &= ~kSock6HasBytesAvailable;
+                }
+                
+                // Check to see if we need to free our alloc'd buffer
+                // if bufferData is non-nil, it has taken owenership of the buffer
+                if(bufferData == nil) {
+                    free(buf);
+                }
+                
+                if((long)result < 0) {
+                    [self failCurrentReceive:[self getErrnoError]];
+                    [self scheduleDequeueReceive];
+                }
+                else if(!appIgnoredReceiveData) {
+                    BOOL finished = [self maybeCompleteCurrentReceive];
+                    if(finished) {
+                        [self scheduleDequeueReceive];
+                    }
+                    else {
+                        _theCurrentReceive->_buffer = nil;
+                        _theCurrentReceive->_host = nil;
+                        
+                        userIgnoredReceiveData = YES;
+                    }
+                }
+            }
+            else {
+                // Request notification when the socket is ready to receive more data
+                CFSocketEnableCallBacks(theSocket, kCFSocketReadCallBack | kCFSocketWriteCallBack);
+            }
+        } while (appIgnoredReceiveData || userIgnoredReceiveData);
+    }
+}
+
+- (BOOL)maybeCompleteCurrentReceive {
+    NSAssert(_theCurrentReceive, @"Trying to complete current receive when there is no current receive.");
+    
+    BOOL finished = YES;
+    
+    if([_theDelegate respondsToSelector:@selector(onUdpSocket:didReceiveData:withTag:fromHost:port:)]) {
+        finished = [_theDelegate onUdpSocket:self didReceiveData:_theCurrentReceive->_buffer withTag:_theCurrentReceive->_tag fromHost:_theCurrentReceive->_host port:_theCurrentReceive->_port];
+    }
+    
+    if(finished) {
+        if(_theCurrentReceive != nil)
+            [self endCurrentReceive];
+    }
+    
+    return finished;
+}
+
+- (void)failCurrentReceive:(NSError *)error {
+    NSAssert(_theCurrentReceive, @"trying to fail current receive when there is no current receive.");
+    if([_theDelegate respondsToSelector:@selector(onUdpSocket:didNotReceiveDataWithTag:dueToError:)]) {
+        [_theDelegate onUdpSocket:self didNotReceiveDataWithTag:_theCurrentReceive->_tag dueToError:error];
+    }
+    
+    if(_theCurrentReceive != nil) {
+        [self endCurrentReceive];
+    }
+}
+
+- (void)endCurrentReceive {
+    NSAssert(_theCurrentReceive, @"trying to end current receive when there is no current receive.");
+    
+    [_theReceiveTimer invalidate], _theReceiveTimer = nil;
+    _theCurrentReceive = nil;
+}
+
+- (void)doReceiveTimeout:(NSTimer *)timer {
+    if(timer != _theReceiveTimer) return;
+    if(_theCurrentReceive != nil) {
+        [self failCurrentReceive:[self getReceiveTimeoutError]];
+        [self scheduleDequeueReceive];
+    }
 }
 
 #pragma mark Errors

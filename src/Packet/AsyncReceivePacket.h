@@ -8,7 +8,7 @@
 
 #import <Foundation/Foundation.h>
 
-@interface AsyncReceivePacekt : NSObject {
+@interface AsyncReceivePacket : NSObject {
 @public
     NSData *_buffer;
     NSString *_host;

@@ -6,9 +6,9 @@
 //  Copyright (c) 2015年 Riven. All rights reserved.
 //
 
-#import "AsyncReceivePacekt.h"
+#import "AsyncReceivePacket.h"
 
-@implementation AsyncReceivePacekt
+@implementation AsyncReceivePacket
 - (instancetype)initWithTimeout:(NSTimeInterval)t tag:(long)i {
     if(self = [super init]) {
         _buffer = nil;
